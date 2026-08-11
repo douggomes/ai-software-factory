@@ -2,13 +2,21 @@
 
 Factory local, assíncrona e auditável para orquestrar modelos de IA durante o desenvolvimento de software.
 
-O repositório está em fase de bootstrap. A execução por agentes é governada por [AGENTS.md](AGENTS.md), e o backlog normativo está em [planejamento/plan.md](planejamento/plan.md).
+O repositório está em fase de implementação. A execução por agentes é governada por [AGENTS.md](AGENTS.md), e o backlog normativo está em [docs/planejamento/plan.md](docs/planejamento/plan.md).
 
 Somente a task com `status: ready` pode ser executada. Use o validador antes de iniciar:
 
 ```bash
 python3 scripts/validate_tasks.py
 ```
+
+Ao terminar uma task, as instruções de validação manual são exibidas com:
+
+```bash
+python3 scripts/show_manual_validation.py TASK-NNN
+```
+
+Após os gates, o agente cria commit, publica a branch e abre/atualiza automaticamente um draft PR para `dev` usando o `gh` autenticado. Ajustes posteriores usam novos commits na mesma branch/PR.
 
 ## Fluxo Git
 

@@ -8,14 +8,13 @@ import sys
 from dataclasses import dataclass
 from pathlib import Path
 
-
 ROOT = Path(__file__).resolve().parents[1]
-PLANNING = ROOT / "planejamento"
+PLANNING = ROOT / "docs" / "planejamento"
 TASK_FILE = re.compile(r"task(?P<number>[1-9][0-9]*)\.md$")
 TASK_ID = re.compile(r"TASK-(?P<number>[0-9]{3})$")
 SHA = re.compile(r"[0-9a-f]{40}$")
 LINK = re.compile(r"\[[^]]+\]\((?!https?://|#)([^)]+\.md)(?:#[^)]*)?\)")
-AC = re.compile(r"^- \[ \] \*\*(AC-[0-9]{3})\*\* — ", re.MULTILINE)
+AC = re.compile(r"^- \[[ x]\] \*\*(AC-[0-9]{3})\*\* — ", re.MULTILINE)
 MATRIX_AC = re.compile(r"^\| (AC-[0-9]{3}) \| `[^`]+` \| [^|]+ \| [^|]+ \|$", re.MULTILINE)
 
 REQUIRED_FIELDS = {
@@ -39,11 +38,13 @@ REQUIRED_SECTIONS = (
     "Riscos e controles",
     "Critérios de aceite",
     "Matriz de verificação",
+    "Validação manual no terminal",
     "Fora de escopo",
     "Evidência de conclusão",
 )
 ALLOWED_STATUS = {"planned", "ready", "in_progress", "blocked", "done"}
 ALLOWED_RISK = {"low", "medium", "high", "critical"}
+MIN_ACCEPTANCE_CRITERIA = 2
 
 
 @dataclass(frozen=True)
@@ -104,7 +105,7 @@ def load_tasks(errors: list[str]) -> list[Task]:
     return tasks
 
 
-def validate_task(task: Task, errors: list[str]) -> None:
+def validate_identity(task: Task, errors: list[str]) -> None:
     file_match = TASK_FILE.fullmatch(task.path.name)
     id_match = TASK_ID.fullmatch(task.task_id)
     if not file_match or not id_match:
@@ -112,6 +113,8 @@ def validate_task(task: Task, errors: list[str]) -> None:
     elif int(file_match["number"]) != int(id_match["number"]):
         errors.append(f"{task.path}: filename não corresponde a {task.task_id}")
 
+
+def validate_state(task: Task, errors: list[str]) -> None:
     status = task.fields.get("status", "")
     if status not in ALLOWED_STATUS:
         errors.append(f"{task.path}: status inválido: {status}")
@@ -120,21 +123,17 @@ def validate_task(task: Task, errors: list[str]) -> None:
         errors.append(f"{task.path}: risk_level inválido: {risk}")
 
     baseline = task.fields.get("baseline_commit", "")
-    if status == "ready":
-        if task.task_id == "TASK-001":
-            if baseline != "UNBORN" and not SHA.fullmatch(baseline):
-                errors.append(f"{task.path}: baseline ready deve ser UNBORN ou SHA")
-        elif not SHA.fullmatch(baseline):
-            errors.append(f"{task.path}: task ready exige baseline SHA de 40 caracteres")
-    elif status == "planned" and baseline != "TO_BE_PINNED":
+    if status == "planned" and baseline != "TO_BE_PINNED":
         errors.append(f"{task.path}: task planned deve usar TO_BE_PINNED")
-    elif status in {"in_progress", "blocked", "done"}:
-        if task.task_id == "TASK-001":
-            if baseline != "UNBORN" and not SHA.fullmatch(baseline):
-                errors.append(f"{task.path}: baseline ativo/concluído inválido")
-        elif not SHA.fullmatch(baseline):
-            errors.append(f"{task.path}: task ativa/concluída exige baseline SHA")
+        return
+    if status == "planned":
+        return
+    task_one_baseline = task.task_id == "TASK-001" and baseline == "UNBORN"
+    if not task_one_baseline and not SHA.fullmatch(baseline):
+        errors.append(f"{task.path}: task não planejada exige baseline SHA")
 
+
+def validate_sections_and_paths(task: Task, errors: list[str]) -> None:
     for name in REQUIRED_SECTIONS:
         body = section(task.text, name)
         if not body:
@@ -147,9 +146,11 @@ def validate_task(task: Task, errors: list[str]) -> None:
     if not re.search(r"^- `[^`]+`", forbidden, re.MULTILINE):
         errors.append(f"{task.path}: Arquivos proibidos sem path explícito")
 
+
+def validate_acceptance_mapping(task: Task, errors: list[str]) -> None:
     criteria = AC.findall(section(task.text, "Critérios de aceite"))
     matrix = MATRIX_AC.findall(section(task.text, "Matriz de verificação"))
-    if len(criteria) < 2:
+    if len(criteria) < MIN_ACCEPTANCE_CRITERIA:
         errors.append(f"{task.path}: mínimo de dois critérios de aceite")
     if len(criteria) != len(set(criteria)):
         errors.append(f"{task.path}: AC duplicado")
@@ -158,21 +159,38 @@ def validate_task(task: Task, errors: list[str]) -> None:
             f"{task.path}: matriz não cobre ACs exatamente: critérios={criteria}, matriz={matrix}"
         )
 
-    if "AGENTS.md" not in task.text or "engineering-standards.md" not in task.text:
-        errors.append(f"{task.path}: referências normativas ausentes")
+    manual = section(task.text, "Validação manual no terminal")
+    commands = re.findall(r"^[0-9]+\. `[^`]+`$", manual, re.MULTILINE)
+    expectations = re.findall(r"^   Esperado: .+$", manual, re.MULTILINE)
+    if not commands or len(commands) != len(expectations):
+        errors.append(f"{task.path}: validação manual exige pares numerados comando/Esperado")
 
 
-def validate_graph(tasks: list[Task], errors: list[str]) -> None:
-    by_id = {task.task_id: task for task in tasks}
-    if len(by_id) != len(tasks):
-        errors.append("task_id duplicado")
-    for task in tasks:
-        for dependency in task.dependencies:
-            if dependency not in by_id:
-                errors.append(f"{task.path}: dependência inexistente {dependency}")
-            elif dependency == task.task_id:
-                errors.append(f"{task.path}: dependência de si mesma")
+def validate_normative_references(task: Task, errors: list[str]) -> None:
+    references = ("AGENTS.md", "engineering-standards.md", "security-review.md")
+    missing = [reference for reference in references if reference not in task.text]
+    if missing:
+        errors.append(f"{task.path}: referências normativas ausentes: {missing}")
 
+
+def validate_task(task: Task, errors: list[str]) -> None:
+    validate_identity(task, errors)
+    validate_state(task, errors)
+    validate_sections_and_paths(task, errors)
+    validate_acceptance_mapping(task, errors)
+    validate_normative_references(task, errors)
+
+
+def validate_dependencies(by_id: dict[str, Task], errors: list[str]) -> None:
+    for task in by_id.values():
+        missing = [dependency for dependency in task.dependencies if dependency not in by_id]
+        if missing:
+            errors.append(f"{task.path}: dependências inexistentes {missing}")
+        if task.task_id in task.dependencies:
+            errors.append(f"{task.path}: dependência de si mesma")
+
+
+def validate_cycles(by_id: dict[str, Task], errors: list[str]) -> None:
     visiting: set[str] = set()
     visited: set[str] = set()
 
@@ -191,22 +209,38 @@ def validate_graph(tasks: list[Task], errors: list[str]) -> None:
     for task_id in by_id:
         visit(task_id)
 
-    ready = [task for task in tasks if task.fields.get("status") == "ready"]
-    if len(ready) != 1:
+
+def validate_ready_task(by_id: dict[str, Task], errors: list[str]) -> None:
+    ready = [task for task in by_id.values() if task.fields.get("status") == "ready"]
+    if len(ready) > 1:
         errors.append(
-            f"deve existir exatamente uma task ready; encontrado: {[task.task_id for task in ready]}"
+            f"pode existir no máximo uma task ready; encontrado: {[task.task_id for task in ready]}"
         )
-    else:
-        for dependency in ready[0].dependencies:
-            dependency_status = by_id[dependency].fields.get("status")
-            if dependency_status != "done":
-                errors.append(
-                    f"{ready[0].path}: dependência {dependency} não está done: {dependency_status}"
-                )
+        return
+    if not ready:
+        return
+    task = ready[0]
+    incomplete = [
+        dependency
+        for dependency in task.dependencies
+        if by_id[dependency].fields.get("status") != "done"
+    ]
+    if incomplete:
+        errors.append(f"{task.path}: dependências não concluídas: {incomplete}")
+
+
+def validate_graph(tasks: list[Task], errors: list[str]) -> None:
+    by_id = {task.task_id: task for task in tasks}
+    if len(by_id) != len(tasks):
+        errors.append("task_id duplicado")
+        return
+    validate_dependencies(by_id, errors)
+    validate_cycles(by_id, errors)
+    validate_ready_task(by_id, errors)
 
 
 def validate_links(errors: list[str]) -> None:
-    for path in [ROOT / "AGENTS.md", *PLANNING.glob("*.md")]:
+    for path in [ROOT / "AGENTS.md", ROOT / "README.md", *PLANNING.glob("*.md")]:
         text = path.read_text(encoding="utf-8")
         for raw_target in LINK.findall(text):
             target = (path.parent / raw_target).resolve()
@@ -228,7 +262,10 @@ def main() -> int:
             print(f"ERROR: {error}", file=sys.stderr)
         print(f"FAILED: {len(errors)} erro(s)", file=sys.stderr)
         return 1
-    ready = next(task.task_id for task in tasks if task.fields.get("status") == "ready")
+    ready = next(
+        (task.task_id for task in tasks if task.fields.get("status") == "ready"),
+        "none",
+    )
     print(f"OK: {len(tasks)} tasks; ready={ready}; contratos e links válidos")
     return 0
 
