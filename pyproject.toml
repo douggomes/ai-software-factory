@@ -10,7 +10,10 @@ readme = "README.md"
 requires-python = ">=3.13,<3.15"
 license = "MIT"
 authors = [{ name = "Douglas Gomes" }]
-dependencies = []
+dependencies = [
+    "sqlalchemy[asyncio]>=2.0,<3",
+    "aiosqlite>=0.20,<1",
+]
 
 [project.scripts]
 aif = "ai_software_factory.cli:main"
@@ -28,6 +31,7 @@ dev = [
     "pip-audit>=2.9,<3",
     "pyright>=1.1.400,<2",
     "pytest>=9.0.3,<10",
+    "pytest-asyncio>=1.0,<2",
     "pytest-cov>=6.0,<7",
     "ruff>=0.14,<0.15",
 ]
@@ -71,6 +75,7 @@ reportMissingTypeStubs = false
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 addopts = "--strict-markers --strict-config"
+asyncio_mode = "auto"
 
 [tool.coverage.run]
 source = ["ai_software_factory"]
@@ -84,3 +89,20 @@ name = "config não depende do composition root da CLI"
 type = "forbidden"
 source_modules = ["ai_software_factory.config"]
 forbidden_modules = ["ai_software_factory.cli"]
+
+[[tool.importlinter.contracts]]
+name = "core não importa adapters nem ports"
+type = "forbidden"
+source_modules = ["ai_software_factory.core"]
+forbidden_modules = [
+    "ai_software_factory.adapters",
+    "ai_software_factory.ports",
+    "ai_software_factory.application",
+    "ai_software_factory.cli",
+]
+
+[[tool.importlinter.contracts]]
+name = "ports não importa adapters"
+type = "forbidden"
+source_modules = ["ai_software_factory.ports"]
+forbidden_modules = ["ai_software_factory.adapters"]
