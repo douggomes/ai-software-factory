@@ -99,6 +99,31 @@ def test_doctor_requires_json_flag() -> None:
         cli.main(["doctor"])
 
 
+def test_doctor_fails_fast_on_invalid_config(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    """QA-001-001 regression: an invalid factory.toml fails before any probe runs."""
+    expected_invalid_exit_code = 2
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "factory.toml").write_text("campo_inexistente = true\n", encoding="utf-8")
+    probed = False
+
+    def _spy_default_probes() -> cli.DoctorProbes:
+        nonlocal probed
+        probed = True
+        return cli.default_probes()
+
+    monkeypatch.setattr(cli, "default_probes", _spy_default_probes)
+
+    exit_code = cli.main(["doctor", "--json"])
+
+    assert exit_code == expected_invalid_exit_code
+    assert probed is False
+    assert "campo_inexistente" in capsys.readouterr().err
+
+
 def test_main_without_command_prints_help_and_returns_failure(
     capsys: pytest.CaptureFixture[str],
 ) -> None:

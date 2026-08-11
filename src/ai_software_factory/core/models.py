@@ -6,11 +6,17 @@ They represent the core business concepts from the UML model in plan.md.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from enum import Enum, auto
 from typing import Final
 
 from ai_software_factory.core.ids import AttemptId, RunId, TaskId
+
+#: Git commit SHA-1, hex.
+_BASE_COMMIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
+#: SHA-256 config hash, hex.
+_CONFIG_HASH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RunStatus(Enum):
@@ -77,6 +83,12 @@ class Run:
     status: RunStatus
     config_hash: str
 
+    def __post_init__(self) -> None:
+        if not _BASE_COMMIT_PATTERN.match(self.base_commit):
+            raise ValueError(f"invalid base_commit format: {self.base_commit!r}")
+        if not _CONFIG_HASH_PATTERN.match(self.config_hash):
+            raise ValueError(f"invalid config_hash format: {self.config_hash!r}")
+
 
 @dataclass(frozen=True, slots=True)
 class TaskExecution:
@@ -93,6 +105,14 @@ class TaskExecution:
     stage: TaskStage
     repair_count: int = 0
     failover_count: int = 0
+
+    def __post_init__(self) -> None:
+        if not _BASE_COMMIT_PATTERN.match(self.base_commit):
+            raise ValueError(f"invalid base_commit format: {self.base_commit!r}")
+        if self.repair_count < 0:
+            raise ValueError(f"repair_count must be non-negative: {self.repair_count}")
+        if self.failover_count < 0:
+            raise ValueError(f"failover_count must be non-negative: {self.failover_count}")
 
 
 @dataclass(frozen=True, slots=True)

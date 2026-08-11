@@ -2,9 +2,9 @@
 title: "TASK-003 — Modelo de domínio e máquina de estados"
 task_id: TASK-003
 release: "V0.1"
-status: planned
+status: done
 depends_on: [TASK-002]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "c7a1945b7ec99e900c375ff928f3e37c6396d32a"
 risk_level: high
 ---
 
@@ -19,11 +19,11 @@ Runs, tasks e attempts possuem identidade e transições determinísticas indepe
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
@@ -81,16 +81,16 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Todas as transições documentadas possuem teste e resultado determinístico.
-- [ ] **AC-002** — Estado terminal, evento desconhecido e identidade incompatível falham sem mutação.
-- [ ] **AC-003** — Core não importa adapters, ORM, SDK ou nomes de provider.
+- [x] **AC-001** — Todas as transições documentadas possuem teste e resultado determinístico.
+- [x] **AC-002** — Estado terminal, evento desconhecido e identidade incompatível falham sem mutação.
+- [x] **AC-003** — Core não importa adapters, ORM, SDK ou nomes de provider.
 
 ## Matriz de verificação
 
 | Critério | Comando exato | Teste/asserção | Evidência persistida |
 |---|---|---|---|
-| AC-001 | `uv run pytest tests/unit/core/test_state_machine.py::test_all_transitions_and_terminal_invariants -q` | 100% da tabela de transição exercitada | coverage de branches do módulo |
-| AC-002 | `uv run pytest tests/unit/core/test_state_machine.py::test_invalid_transition_is_atomic -q` | objeto original permanece igual | relatório pytest |
+| AC-001 | `uv run pytest tests/unit/core/test_state_machine.py::TestAllTransitionsAndTerminalInvariants::test_all_transitions_and_terminal_invariants -q` | 100% da tabela de transição exercitada | coverage de branches do módulo |
+| AC-002 | `uv run pytest tests/unit/core/test_state_machine.py::TestInvalidTransitionIsAtomic::test_invalid_transition_is_atomic -q` | objeto original permanece igual | relatório pytest |
 | AC-003 | `uv run lint-imports` | contratos de import aprovados | saída `lint-imports` |
 
 ## Validação manual no terminal

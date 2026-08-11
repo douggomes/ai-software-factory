@@ -12,7 +12,13 @@ import pytest
 
 from ai_software_factory.core.events import DomainEvent, EventType
 from ai_software_factory.core.ids import AttemptId, RunId, TaskId
-from ai_software_factory.core.models import TERMINAL_STAGES, TaskStage
+from ai_software_factory.core.models import (
+    TERMINAL_STAGES,
+    Run,
+    RunStatus,
+    TaskExecution,
+    TaskStage,
+)
 from ai_software_factory.core.state_machine import (
     InvalidTransitionError,
     Transition,
@@ -337,3 +343,59 @@ class TestDomainEvent:
             payload={"key": "value"},
         )
         assert event.payload == {"key": "value"}
+
+
+class TestRunAndTaskExecutionValidation:
+    """QA-004-006 regression: domain validation backs the DB's CHECK constraints."""
+
+    def test_run_rejects_invalid_base_commit(self) -> None:
+        with pytest.raises(ValueError, match="invalid base_commit"):
+            Run(
+                run_id=RunId("run-abcdefghijk1"),
+                spec_id="spec-1",
+                base_commit="short",
+                status=RunStatus.QUEUED,
+                config_hash="b" * 64,
+            )
+
+    def test_run_rejects_invalid_config_hash(self) -> None:
+        with pytest.raises(ValueError, match="invalid config_hash"):
+            Run(
+                run_id=RunId("run-abcdefghijk1"),
+                spec_id="spec-1",
+                base_commit="a" * 40,
+                status=RunStatus.QUEUED,
+                config_hash="short",
+            )
+
+    def test_task_execution_rejects_invalid_base_commit(self) -> None:
+        with pytest.raises(ValueError, match="invalid base_commit"):
+            TaskExecution(
+                run_id=RunId("run-abcdefghijk1"),
+                task_id=TaskId("TASK-001"),
+                base_commit="short",
+                worktree_path="/worktrees/test",
+                stage=TaskStage.QUEUED,
+            )
+
+    def test_task_execution_rejects_negative_repair_count(self) -> None:
+        with pytest.raises(ValueError, match="repair_count must be non-negative"):
+            TaskExecution(
+                run_id=RunId("run-abcdefghijk1"),
+                task_id=TaskId("TASK-001"),
+                base_commit="a" * 40,
+                worktree_path="/worktrees/test",
+                stage=TaskStage.QUEUED,
+                repair_count=-1,
+            )
+
+    def test_task_execution_rejects_negative_failover_count(self) -> None:
+        with pytest.raises(ValueError, match="failover_count must be non-negative"):
+            TaskExecution(
+                run_id=RunId("run-abcdefghijk1"),
+                task_id=TaskId("TASK-001"),
+                base_commit="a" * 40,
+                worktree_path="/worktrees/test",
+                stage=TaskStage.QUEUED,
+                failover_count=-1,
+            )
