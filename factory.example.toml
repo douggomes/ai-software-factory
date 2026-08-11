@@ -1,0 +1,13 @@
+# Example Factory configuration.
+#
+# Copy to ./factory.toml and adjust before running commands with side effects.
+# Unknown keys and wrong-typed values cause `Settings.load` to fail before
+# any effect is produced; there is no silent fallback for a hostile file.
+
+# Deny API-metered provider calls by default; only CLI workers authenticated
+# through their own subscription/login are used unless explicitly overridden.
+no_incremental_cost = true
+
+# `aif doctor` stays offline unless `--live` is passed on the command line;
+# this flag does not by itself enable a live probe.
+live_probes = false

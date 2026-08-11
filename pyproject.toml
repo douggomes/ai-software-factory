@@ -12,6 +12,9 @@ license = "MIT"
 authors = [{ name = "Douglas Gomes" }]
 dependencies = []
 
+[project.scripts]
+aif = "ai_software_factory.cli:main"
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_software_factory"]
 
@@ -19,4 +22,65 @@ packages = ["src/ai_software_factory"]
 package = true
 
 [dependency-groups]
-dev = []
+dev = [
+    "detect-secrets>=1.5,<2",
+    "import-linter>=2.3,<3",
+    "pip-audit>=2.9,<3",
+    "pyright>=1.1.400,<2",
+    "pytest>=9.0.3,<10",
+    "pytest-cov>=6.0,<7",
+    "ruff>=0.14,<0.15",
+]
+
+[tool.ruff]
+target-version = "py313"
+line-length = 100
+src = ["src", "tests"]
+
+[tool.ruff.lint]
+select = [
+    "E",
+    "F",
+    "I",
+    "UP",
+    "B",
+    "S",
+    "C4",
+    "C90",
+    "N",
+    "SIM",
+    "ASYNC",
+    "PL",
+    "RUF",
+]
+
+[tool.ruff.lint.mccabe]
+max-complexity = 10
+
+[tool.ruff.lint.per-file-ignores]
+"tests/**" = ["S101"] # assert is the point of a test
+
+[tool.ruff.format]
+line-ending = "lf"
+
+[tool.pyright]
+include = ["src", "tests"]
+typeCheckingMode = "strict"
+reportMissingTypeStubs = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+addopts = "--strict-markers --strict-config"
+
+[tool.coverage.run]
+source = ["ai_software_factory"]
+branch = true
+
+[tool.importlinter]
+root_package = "ai_software_factory"
+
+[[tool.importlinter.contracts]]
+name = "config não depende do composition root da CLI"
+type = "forbidden"
+source_modules = ["ai_software_factory.config"]
+forbidden_modules = ["ai_software_factory.cli"]
