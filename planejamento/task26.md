@@ -1,0 +1,102 @@
+---
+title: "TASK-026 — Dataset, hidden tests e release V0.5"
+task_id: TASK-026
+release: "V0.5"
+status: planned
+depends_on: [TASK-025]
+baseline_commit: "TO_BE_PINNED"
+risk_level: critical
+---
+
+# TASK-026 — Dataset, hidden tests e release V0.5
+
+> [!important] Contrato de execução por IA
+> Execute somente quando `status: ready`, seguindo [AGENTS.md](../AGENTS.md), [engineering-standards.md](engineering-standards.md) e [security-review.md](security-review.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
+
+## Valor entregue
+
+Cinco tasks reais medem arquiteturas A/B/C sem vazar hidden tests ou executar origem não confiável no host.
+
+## Definition of Ready
+
+- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [ ] Todas as precondições abaixo foram verificadas.
+- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [ ] Não existe outra task `ready` nem conflito de arquivos.
+
+## Precondições
+
+- TASK-025 aprovada com harness fake.
+- Baseline fixado no commit aprovado da TASK-025.
+- Factory-lab possui commits-base revisados e trust classification explícita.
+
+## Arquivos permitidos
+
+- `benchmarks/datasets/v0.5/**`
+- `tests/security/test_hidden_test_isolation.py`
+- `tests/release/test_v0_5.py`
+- `docs/releases/v0.5.md`
+- `docs/benchmark-results/v0.5/**`
+
+Qualquer outro path é proibido, inclusive arquivo gerado não listado.
+
+## Arquivos proibidos
+
+- `planejamento/**`
+- `.env*`, `**/auth.json`, chaves e credenciais
+- paths fora da raiz ou alcançados por symlink
+- arquivos do usuário não relacionados já modificados
+
+## Interfaces e contratos
+
+| Símbolo/contrato | Definição fechada |
+|---|---|
+| `dataset v0.5` | Feature, bugfix, tests, refactor e security/idempotency; cada uma com commit SHA. |
+| `HiddenTestProvider` config | Root privada fora do worktree; entregue somente ao evaluator após worker. |
+| `V0.5 report` | Raw results, sample size, first/final pass, repairs, failures e limitations. |
+
+## Defaults e decisões fechadas
+
+| Chave | Valor normativo |
+|---|---|
+| `dataset_size` | 5 |
+| `repetitions` | 1 por A/B/C na release |
+| `hidden_visibility` | evaluator-only após worker |
+| `untrusted_repo` | exige isolamento forte; ausência fail-closed |
+| `claims` | descritivas; sem significância forte |
+
+## Passos de implementação
+
+1. Versionar manifest/commits-base e critérios das cinco tasks.
+2. Implementar/configurar hidden test injection fora do contexto.
+3. Executar security isolation e A/B/C com budgets iguais.
+4. Produzir raw results e dossier V0.5 sem extrapolação.
+
+## Riscos e controles
+
+| Risco | Controle obrigatório | Teste negativo |
+|---|---|---|
+| Hidden test vazar ou repo comprometer host | Evaluator-only e isolamento forte/fail-closed | `test_worker_cannot_discover_hidden_tests_or_host` |
+
+## Critérios de aceite
+
+- [ ] **AC-001** — Worker/context/MCP/telemetry não conseguem listar, ler ou inferir hidden tests antes da avaliação.
+- [ ] **AC-002** — Traversal/symlink/hook/subprocess do dataset não alcança home/hidden tests; untrusted sem sandbox falha.
+- [ ] **AC-003** — Cinco commits-base executam A/B/C com raw results e relatório/dossier reproduzíveis.
+
+## Matriz de verificação
+
+| Critério | Comando exato | Teste/asserção | Evidência persistida |
+|---|---|---|---|
+| AC-001 | `uv run pytest tests/security/test_hidden_test_isolation.py::test_worker_cannot_discover_hidden_tests_or_host -q` | zero paths/content leaked | context/tool/telemetry scans |
+| AC-002 | `uv run pytest tests/security/test_hidden_test_isolation.py::test_untrusted_dataset_requires_strong_isolation -q` | host canaries intactos e fail-closed | isolation capability report |
+| AC-003 | `uv run pytest tests/release/test_v0_5.py -q` | dataset/hash/result schemas aprovados | results.json + dossier V0.5 |
+
+## Fora de escopo
+
+20 tasks, inferência estatística forte, router dinâmico e execução host de repo arbitrário.
+
+## Evidência de conclusão
+
+Relatório obrigatório de [AGENTS.md](../AGENTS.md) contendo baseline, diff, cada AC com comando/resultado/evidência, gates globais, segurança e riscos residuais. Nenhum transcript bruto ou segredo.

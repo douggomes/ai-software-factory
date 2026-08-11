@@ -1,0 +1,22 @@
+[build-system]
+requires = ["hatchling>=1.27,<2"]
+build-backend = "hatchling.build"
+
+[project]
+name = "ai-software-factory"
+version = "0.0.0"
+description = "Local, auditable orchestration for AI-assisted software delivery"
+readme = "README.md"
+requires-python = ">=3.13,<3.15"
+license = "MIT"
+authors = [{ name = "Douglas Gomes" }]
+dependencies = []
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/ai_software_factory"]
+
+[tool.uv]
+package = true
+
+[dependency-groups]
+dev = []
