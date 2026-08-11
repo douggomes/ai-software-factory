@@ -1,15 +1,17 @@
 """``aif`` command-line entry point.
 
-Only offline, read-only behavior lives here for now: printing the installed
-version, running local diagnostics (``doctor``) and validating SPEC files
-(``spec validate``). No command in this module invokes a provider or performs
-a network call.
+Offline, read-only and local commands live here: version, diagnostics
+(``doctor``), SPEC validation (``spec validate``), run status and event
+export. No command in this module invokes a provider or performs a network
+call beyond local filesystem/SQLite access.
 """
 
 from __future__ import annotations
 
 import argparse
+import asyncio
 import json
+import os
 import shutil
 import sqlite3
 import subprocess
@@ -20,14 +22,24 @@ from pathlib import Path
 from typing import Final
 
 from ai_software_factory import __version__
+from ai_software_factory.adapters.persistence.artifact_store import SqliteEventLogReader
+from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
+from ai_software_factory.application.queries import (
+    RunEventsQuery,
+    RunStatusQuery,
+    format_events_ndjson,
+    format_run_status_json,
+)
 from ai_software_factory.application.spec_parser import SpecParseError, SpecParser
 from ai_software_factory.application.spec_validator import SpecValidator
 from ai_software_factory.config import ConfigError, Settings
+from ai_software_factory.core.ids import RunId
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
     ValidationReport,
     canonical_json,
 )
+from ai_software_factory.ports.persistence import RunNotFoundError
 
 #: Executable name probed for each supported worker/reviewer CLI. Presence is
 #: checked with ``shutil.which`` only; the executable is never invoked.
@@ -41,6 +53,10 @@ _VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 _VERSION_FLAG: Final[str] = "--version"
 _EXIT_VALID: Final[int] = 0
 _EXIT_INVALID: Final[int] = 2
+_EXIT_NOT_FOUND: Final[int] = 1
+_FACTORY_HOME_ENV: Final[str] = "AIF_FACTORY_HOME"
+_DEFAULT_FACTORY_HOME: Final[Path] = Path.home() / ".aifactory"
+_STATE_DB_NAME: Final[str] = "state.db"
 
 
 @dataclass(frozen=True, slots=True)
@@ -125,6 +141,20 @@ def build_doctor_report(probes: DoctorProbes) -> dict[str, object]:
     }
 
 
+def resolve_factory_home(env: Mapping[str, str] | None = None) -> Path:
+    """Resolve the runtime factory home directory."""
+    source = os.environ if env is None else env
+    raw = source.get(_FACTORY_HOME_ENV)
+    if raw is None or raw.strip() == "":
+        return _DEFAULT_FACTORY_HOME.expanduser().resolve()
+    return Path(raw).expanduser().resolve()
+
+
+def resolve_state_db(factory_home: Path | None = None) -> Path:
+    home = factory_home if factory_home is not None else resolve_factory_home()
+    return home / _STATE_DB_NAME
+
+
 def _run_spec_validate(
     path: Path,
     task_id: str | None,
@@ -136,14 +166,12 @@ def _run_spec_validate(
     except OSError as error:
         _emit_read_error(error, path, as_json)
         return _EXIT_INVALID
-
     parser = SpecParser()
     try:
         spec = parser.parse(text)
     except SpecParseError as error:
         _emit_parse_error(error, as_json)
         return _EXIT_INVALID
-
     validator = SpecValidator()
     report = validator.validate(spec, task_id=task_id)
     _emit_validation_report(report, task_id, as_json)
@@ -204,6 +232,79 @@ def _emit_text_report(report: ValidationReport) -> None:
         print(f"  - {err.code}: {err.message}{location}")
 
 
+def _parse_run_id(raw: str) -> RunId:
+    return RunId(raw)
+
+
+async def _run_status_async(run_id: RunId, db_path: Path) -> str:
+    store = await SQLiteRunStore.create(db_path)
+    try:
+        view = await RunStatusQuery(store).execute(run_id)
+        return format_run_status_json(view)
+    finally:
+        await store.close()
+
+
+async def _run_events_async(run_id: RunId, db_path: Path) -> str:
+    store = await SQLiteRunStore.create(db_path)
+    try:
+        reader = await SqliteEventLogReader.connect(db_path)
+        try:
+            events = await RunEventsQuery(store, reader).execute(run_id)
+            return format_events_ndjson(events)
+        finally:
+            await reader.close()
+    finally:
+        await store.close()
+
+
+def _run_status_command(run_id_raw: str, *, as_json: bool, factory_home: Path | None) -> int:
+    if not as_json:
+        print("error: aif status requires --json", file=sys.stderr)
+        return _EXIT_INVALID
+    try:
+        run_id = _parse_run_id(run_id_raw)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    db_path = resolve_state_db(factory_home)
+    if not db_path.exists():
+        print(f"error: state database not found at {db_path}", file=sys.stderr)
+        return _EXIT_NOT_FOUND
+    try:
+        payload = asyncio.run(_run_status_async(run_id, db_path))
+    except RunNotFoundError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_NOT_FOUND
+    except OSError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    sys.stdout.write(payload)
+    return _EXIT_VALID
+
+
+def _run_events_command(run_id_raw: str, *, factory_home: Path | None) -> int:
+    try:
+        run_id = _parse_run_id(run_id_raw)
+    except ValueError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    db_path = resolve_state_db(factory_home)
+    if not db_path.exists():
+        print(f"error: state database not found at {db_path}", file=sys.stderr)
+        return _EXIT_NOT_FOUND
+    try:
+        payload = asyncio.run(_run_events_async(run_id, db_path))
+    except RunNotFoundError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_NOT_FOUND
+    except OSError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    sys.stdout.write(payload)
+    return _EXIT_VALID
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aif", description="AI Software Factory CLI")
     parser.add_argument("--version", action="version", version=__version__)
@@ -221,7 +322,38 @@ def build_parser() -> argparse.ArgumentParser:
     validate.add_argument("--task", type=str, default=None, help="Select a single task by ID")
     validate.add_argument("--json", action="store_true", default=False, help="Emit result as JSON")
 
+    status = subcommands.add_parser("status", help="Show persisted run status (read-only)")
+    status.add_argument("run_id", type=str, help="Run identifier (run-xxxxxxxxxxxx)")
+    status.add_argument(
+        "--json",
+        action="store_true",
+        required=True,
+        help="Emit status as canonical JSON",
+    )
+
+    events = subcommands.add_parser(
+        "events",
+        help="Export run events as deterministic NDJSON (derived from ledger)",
+    )
+    events.add_argument("run_id", type=str, help="Run identifier (run-xxxxxxxxxxxx)")
+
     return parser
+
+
+def _dispatch(args: argparse.Namespace, factory_home: Path) -> int | None:
+    if args.command == "doctor":
+        report = build_doctor_report(default_probes())
+        print(json.dumps(report, indent=2, sort_keys=True))
+        return 0
+    if args.command == "spec":
+        if args.spec_command == "validate":
+            return _run_spec_validate(args.path, args.task, args.json)
+        return None
+    if args.command == "status":
+        return _run_status_command(args.run_id, as_json=args.json, factory_home=factory_home)
+    if args.command == "events":
+        return _run_events_command(args.run_id, factory_home=factory_home)
+    return None
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -232,13 +364,11 @@ def main(argv: Sequence[str] | None = None) -> int:
     except ConfigError as error:
         print(f"error: {error}", file=sys.stderr)
         return _EXIT_INVALID
-    if args.command == "doctor":
-        report = build_doctor_report(default_probes())
-        print(json.dumps(report, indent=2, sort_keys=True))
-        return 0
+    factory_home = resolve_factory_home()
+    result = _dispatch(args, factory_home)
+    if result is not None:
+        return result
     if args.command == "spec":
-        if args.spec_command == "validate":
-            return _run_spec_validate(args.path, args.task, args.json)
         parser.parse_args(["spec", "--help"])
         return 1
     parser.print_help()
