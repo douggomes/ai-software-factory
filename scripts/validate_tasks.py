@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+import ast
 import re
 import sys
 from dataclasses import dataclass
@@ -16,6 +17,8 @@ SHA = re.compile(r"[0-9a-f]{40}$")
 LINK = re.compile(r"\[[^]]+\]\((?!https?://|#)([^)]+\.md)(?:#[^)]*)?\)")
 AC = re.compile(r"^- \[[ x]\] \*\*(AC-[0-9]{3})\*\* — ", re.MULTILINE)
 MATRIX_AC = re.compile(r"^\| (AC-[0-9]{3}) \| `[^`]+` \| [^|]+ \| [^|]+ \|$", re.MULTILINE)
+UNCHECKED_ITEM = re.compile(r"^- \[ \]", re.MULTILINE)
+TEST_REFERENCE = re.compile(r"(?P<path>tests/[\w./-]+\.py)(?:::(?P<nodeid>[\w:]+))?")
 
 REQUIRED_FIELDS = {
     "title",
@@ -173,12 +176,68 @@ def validate_normative_references(task: Task, errors: list[str]) -> None:
         errors.append(f"{task.path}: referências normativas ausentes: {missing}")
 
 
+def _ast_node_exists(body: list[ast.stmt], parts: tuple[str, ...]) -> bool:
+    """Walk pytest node-id segments (Class::method) through a parsed test file."""
+    if not parts:
+        return True
+    name, rest = parts[0], parts[1:]
+    for node in body:
+        is_def = isinstance(node, ast.FunctionDef | ast.AsyncFunctionDef | ast.ClassDef)
+        if is_def and node.name == name:
+            return _ast_node_exists(getattr(node, "body", []), rest)
+    return False
+
+
+def validate_test_references(task: Task, errors: list[str]) -> None:
+    """Every `path.py::node::id` referenced by an implemented task must resolve.
+
+    A referenced test *file* that does not exist yet is not an error — the
+    task may still be `planned`. But once the file exists, a node id inside
+    it that cannot be found is a broken normative command (QA-003-001).
+    """
+    seen: set[str] = set()
+    for match in TEST_REFERENCE.finditer(task.text):
+        rel_path = match.group("path")
+        node_id = match.group("nodeid")
+        if node_id is None:
+            continue
+        key = f"{rel_path}::{node_id}"
+        if key in seen:
+            continue
+        seen.add(key)
+        test_path = ROOT / rel_path
+        if not test_path.is_file():
+            continue
+        try:
+            tree = ast.parse(test_path.read_text(encoding="utf-8"))
+        except SyntaxError as error:
+            errors.append(f"{task.path}: não foi possível analisar {rel_path}: {error}")
+            continue
+        if not _ast_node_exists(tree.body, tuple(node_id.split("::"))):
+            errors.append(f"{task.path}: nó de teste inexistente: {key}")
+
+
+def validate_done_checkboxes(task: Task, errors: list[str]) -> None:
+    """A task marked done cannot leave its own gates unchecked (QA-GOV-001)."""
+    if task.fields.get("status") != "done":
+        return
+    for section_name in ("Definition of Ready", "Critérios de aceite"):
+        unchecked = len(UNCHECKED_ITEM.findall(section(task.text, section_name)))
+        if unchecked:
+            errors.append(
+                f"{task.path}: status done mas '{section_name}' tem "
+                f"{unchecked} item(ns) não marcado(s)"
+            )
+
+
 def validate_task(task: Task, errors: list[str]) -> None:
     validate_identity(task, errors)
     validate_state(task, errors)
     validate_sections_and_paths(task, errors)
     validate_acceptance_mapping(task, errors)
     validate_normative_references(task, errors)
+    validate_test_references(task, errors)
+    validate_done_checkboxes(task, errors)
 
 
 def validate_dependencies(by_id: dict[str, Task], errors: list[str]) -> None:

@@ -2,9 +2,9 @@
 title: "TASK-004 — Ledger SQLite transacional e migrations"
 task_id: TASK-004
 release: "V0.1"
-status: planned
+status: done
 depends_on: [TASK-003]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "78906ac116925f30daaa57131856ab825bb3d5f2"
 risk_level: high
 ---
 
@@ -19,11 +19,11 @@ Estado e eventos sobrevivem a reinício e são gravados atomicamente em SQLite v
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
@@ -55,7 +55,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | Símbolo/contrato | Definição fechada |
 |---|---|
 | `RunStore.create_run(run: Run, event: DomainEvent) -> None` | Estado e evento na mesma transação. |
-| `RunStore.transition(task_id: TaskId, transition: Transition) -> None` | Optimistic version check; conflito explícito. |
+| `RunStore.transition(run_id: RunId, task_id: TaskId, transition: Transition) -> None` | Identidade composta run_id+task_id; optimistic version check; conflito explícito. Revisado na correção QA-004-001 para impedir que dois runs com o mesmo TaskId se contaminem. |
 | `RunStore.load_run(run_id: RunId) -> RunSnapshot` | Reconstrói estado sem depender de NDJSON. |
 
 ## Defaults e decisões fechadas
@@ -83,9 +83,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Run criado pode ser carregado após fechar e reabrir o processo/store.
-- [ ] **AC-002** — Falha ao gravar evento reverte a transição completa.
-- [ ] **AC-003** — Migration vazio/upgrade e acesso concorrente por sessões separadas passam.
+- [x] **AC-001** — Run criado pode ser carregado após fechar e reabrir o processo/store.
+- [x] **AC-002** — Falha ao gravar evento reverte a transição completa.
+- [x] **AC-003** — Migration vazio/upgrade e acesso concorrente por sessões separadas passam.
 
 ## Matriz de verificação
 

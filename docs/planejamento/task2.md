@@ -2,9 +2,9 @@
 title: "TASK-002 — Contrato de SPEC e validação fail-fast"
 task_id: TASK-002
 release: "V0.1"
-status: planned
+status: done
 depends_on: [TASK-001]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "cd6517895981b6d77028ffed58dc4f490cab59b2"
 risk_level: high
 ---
 
@@ -19,11 +19,11 @@ O usuário valida uma SPEC canônica antes de criar runtime, worktree ou consumi
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
@@ -85,9 +85,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — SPEC válida produz JSON canônico idêntico em repetições.
-- [ ] **AC-002** — Ciclo, AC duplicado, scope vazio, shell string, excesso e traversal falham com exit `2`.
-- [ ] **AC-003** — Validação nunca cria `.aifactory`, worktree ou chamada externa.
+- [x] **AC-001** — SPEC válida produz JSON canônico idêntico em repetições.
+- [x] **AC-002** — Ciclo, AC duplicado, scope vazio, shell string, excesso e traversal falham com exit `2`.
+- [x] **AC-003** — Validação nunca cria `.aifactory`, worktree ou chamada externa.
 
 ## Matriz de verificação
 

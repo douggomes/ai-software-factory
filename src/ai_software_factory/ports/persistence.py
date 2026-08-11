@@ -46,6 +46,29 @@ class TaskExecutionNotFoundError(Exception):
         super().__init__(f"task execution not found: {task_id.value} in run {run_id.value}")
 
 
+class CorrelationMismatchError(Exception):
+    """Raised when an event's correlation IDs do not match the aggregate it accompanies.
+
+    Raised before any write is attempted, so a mismatched event can never be
+    persisted against the wrong run, task or attempt.
+    """
+
+
+class SchemaVersionError(Exception):
+    """Raised when a database's recorded schema version is not supported.
+
+    A version newer than the latest known migration means the database was
+    written by incompatible code; the store fails closed instead of guessing.
+    """
+
+    def __init__(self, found: int, latest_supported: int) -> None:
+        self.found = found
+        self.latest_supported = latest_supported
+        super().__init__(
+            f"unsupported schema version {found}: latest supported is {latest_supported}"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class RunSnapshot:
     """Reconstructed run state from the persistence layer.
@@ -68,20 +91,33 @@ class RunStore(Protocol):
     """
 
     async def create_run(self, run: Run, event: DomainEvent) -> None:
-        """Persist a new run and its creation event atomically."""
+        """Persist a new run and its creation event atomically.
+
+        Raises CorrelationMismatchError if the event's run_id does not match
+        the run being created.
+        """
         ...
 
     async def create_task_execution(
         self, task_execution: TaskExecution, event: DomainEvent
     ) -> None:
-        """Persist a new task execution and its event atomically."""
+        """Persist a new task execution and its event atomically.
+
+        Raises CorrelationMismatchError if the event's run_id/task_id does
+        not match the task execution being created.
+        """
         ...
 
-    async def transition(self, task_id: TaskId, transition: Transition) -> None:
+    async def transition(self, run_id: RunId, task_id: TaskId, transition: Transition) -> None:
         """Apply a state transition with optimistic version check.
 
+        Identity is the composite (run_id, task_id): two runs may reuse the
+        same TaskId without contaminating each other's state or events.
+
         Raises OptimisticLockError if the current stage does not match
-        the transition's from_stage.
+        the transition's from_stage, TaskExecutionNotFoundError if the
+        (run_id, task_id) pair does not exist, and CorrelationMismatchError
+        if the transition's event does not carry the same run_id/task_id.
         """
         ...
 

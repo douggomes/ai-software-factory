@@ -22,6 +22,7 @@ from typing import Final
 from ai_software_factory import __version__
 from ai_software_factory.application.spec_parser import SpecParseError, SpecParser
 from ai_software_factory.application.spec_validator import SpecValidator
+from ai_software_factory.config import ConfigError, Settings
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
     ValidationReport,
@@ -226,6 +227,11 @@ def build_parser() -> argparse.ArgumentParser:
 def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    try:
+        Settings.load(None)
+    except ConfigError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
     if args.command == "doctor":
         report = build_doctor_report(default_probes())
         print(json.dumps(report, indent=2, sort_keys=True))
