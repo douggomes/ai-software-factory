@@ -377,3 +377,25 @@ class TestRunAndTaskExecutionValidation:
                 worktree_path="/worktrees/test",
                 stage=TaskStage.QUEUED,
             )
+
+    def test_task_execution_rejects_negative_repair_count(self) -> None:
+        with pytest.raises(ValueError, match="repair_count must be non-negative"):
+            TaskExecution(
+                run_id=RunId("run-abcdefghijk1"),
+                task_id=TaskId("TASK-001"),
+                base_commit="a" * 40,
+                worktree_path="/worktrees/test",
+                stage=TaskStage.QUEUED,
+                repair_count=-1,
+            )
+
+    def test_task_execution_rejects_negative_failover_count(self) -> None:
+        with pytest.raises(ValueError, match="failover_count must be non-negative"):
+            TaskExecution(
+                run_id=RunId("run-abcdefghijk1"),
+                task_id=TaskId("TASK-001"),
+                base_commit="a" * 40,
+                worktree_path="/worktrees/test",
+                stage=TaskStage.QUEUED,
+                failover_count=-1,
+            )

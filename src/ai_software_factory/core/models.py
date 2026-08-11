@@ -109,6 +109,10 @@ class TaskExecution:
     def __post_init__(self) -> None:
         if not _BASE_COMMIT_PATTERN.match(self.base_commit):
             raise ValueError(f"invalid base_commit format: {self.base_commit!r}")
+        if self.repair_count < 0:
+            raise ValueError(f"repair_count must be non-negative: {self.repair_count}")
+        if self.failover_count < 0:
+            raise ValueError(f"failover_count must be non-negative: {self.failover_count}")
 
 
 @dataclass(frozen=True, slots=True)

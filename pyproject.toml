@@ -21,6 +21,9 @@ aif = "ai_software_factory.cli:main"
 [tool.hatch.build.targets.wheel]
 packages = ["src/ai_software_factory"]
 
+[tool.hatch.build.targets.wheel.force-include]
+"migrations" = "ai_software_factory/migrations"
+
 [tool.uv]
 package = true
 

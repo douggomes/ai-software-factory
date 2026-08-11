@@ -13,12 +13,14 @@ from __future__ import annotations
 import json
 import os
 import re
-from datetime import UTC, datetime
+from importlib.resources import files
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Any, Final
 
 from sqlalchemy import event as sa_event
 from sqlalchemy import func, select, text, update
+from sqlalchemy.engine import Connection
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, create_async_engine
 
 from ai_software_factory.adapters.persistence.schema import (
@@ -46,7 +48,16 @@ _DIR_MODE: Final[int] = 0o700
 _FILE_MODE: Final[int] = 0o600
 _DB_SIDE_FILE_SUFFIXES: Final[tuple[str, ...]] = ("", "-wal", "-shm", "-journal")
 
-_MIGRATIONS_ROOT: Final[Path] = Path(__file__).resolve().parents[4] / "migrations"
+
+def _resolve_migrations_root() -> Traversable:
+    """Locate migrations both in an installed wheel and in a source checkout."""
+    packaged = files("ai_software_factory").joinpath("migrations")
+    if packaged.is_dir():
+        return packaged
+    return Path(__file__).resolve().parents[4] / "migrations"
+
+
+_MIGRATIONS_ROOT: Final[Traversable] = _resolve_migrations_root()
 _MIGRATION_FILE_PATTERN: Final[re.Pattern[str]] = re.compile(
     r"^(?P<version>\d{4})_[a-z0-9_]+\.sql$"
 )
@@ -62,6 +73,7 @@ def _configure_connection(dbapi_connection: Any, connection_record: Any) -> None
     connection type is an internal driver adapter not exported for typing.
     """
     del connection_record
+    dbapi_connection.isolation_level = None
     cursor = dbapi_connection.cursor()
     try:
         cursor.execute("PRAGMA foreign_keys=ON")
@@ -71,13 +83,22 @@ def _configure_connection(dbapi_connection: Any, connection_record: Any) -> None
         cursor.close()
 
 
-def _load_migrations() -> list[tuple[int, Path]]:
-    migrations: list[tuple[int, Path]] = []
-    for path in sorted(_MIGRATIONS_ROOT.glob("*.sql")):
-        match = _MIGRATION_FILE_PATTERN.match(path.name)
+def _begin_transaction(connection: Connection) -> None:
+    """Start every SQLite transaction explicitly, including migration DDL."""
+    connection.exec_driver_sql("BEGIN")
+
+
+def _load_migrations() -> list[tuple[int, Traversable]]:
+    migrations: list[tuple[int, Traversable]] = []
+    if not _MIGRATIONS_ROOT.is_dir():
+        return migrations
+    for resource in _MIGRATIONS_ROOT.iterdir():
+        if not resource.is_file():
+            continue
+        match = _MIGRATION_FILE_PATTERN.match(resource.name)
         if match is None:
             continue
-        migrations.append((int(match.group("version")), path))
+        migrations.append((int(match.group("version")), resource))
     migrations.sort(key=lambda item: item[0])
     return migrations
 
@@ -190,9 +211,14 @@ class SQLiteRunStore:
             },
         )
         sa_event.listens_for(engine.sync_engine, "connect")(_configure_connection)
+        sa_event.listens_for(engine.sync_engine, "begin")(_begin_transaction)
         store = cls(engine)
-        await store._initialize_schema()
-        _secure_db_files(db_path)
+        try:
+            await store._initialize_schema()
+            _secure_db_files(db_path)
+        except BaseException:
+            await engine.dispose()
+            raise
         return store
 
     async def _initialize_schema(self) -> None:
@@ -205,16 +231,18 @@ class SQLiteRunStore:
             current_version = await self._current_schema_version(conn)
             if current_version > latest_supported:
                 raise SchemaVersionError(found=current_version, latest_supported=latest_supported)
-            for version, path in migrations:
+            for version, resource in migrations:
                 if version <= current_version:
                     continue
-                for statement in _statements(path.read_text(encoding="utf-8")):
+                for statement in _statements(resource.read_text(encoding="utf-8")):
                     await conn.execute(text(statement))
-                await conn.execute(
-                    schema_version_table.insert().values(
-                        version=version, applied_at=datetime.now(UTC)
+                applied_version = await self._current_schema_version(conn)
+                if applied_version != version:
+                    raise SchemaVersionError(
+                        found=applied_version,
+                        latest_supported=version,
                     )
-                )
+                current_version = applied_version
 
     @staticmethod
     async def _current_schema_version(conn: AsyncConnection) -> int:

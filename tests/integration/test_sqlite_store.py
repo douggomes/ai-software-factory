@@ -6,7 +6,13 @@ Tests AC-001, AC-002 and AC-003 from TASK-004.
 from __future__ import annotations
 
 import os
+import shutil
+import sqlite3
 import stat
+import subprocess
+import sys
+import textwrap
+import zipfile
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
 from pathlib import Path
@@ -18,7 +24,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import create_async_engine
 
 from ai_software_factory.adapters.persistence import sqlite as sqlite_module
-from ai_software_factory.adapters.persistence.schema import runs_table, schema_version_table
+from ai_software_factory.adapters.persistence.schema import (
+    runs_table,
+    schema_version_table,
+    task_executions_table,
+)
 from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
 from ai_software_factory.core.events import DomainEvent, EventType
 from ai_software_factory.core.ids import RunId, TaskId
@@ -142,10 +152,10 @@ async def test_concurrent_sessions(tmp_path: Path) -> None:
 async def test_schema_version_recorded(store: SQLiteRunStore) -> None:
     """Verify schema version is recorded during initialization."""
     async with store._engine.connect() as conn:  # pyright: ignore[reportPrivateUsage]
-        result = await conn.execute(sa_select(schema_version_table.c.version))
-        row = result.first()
-        assert row is not None
-        assert row.version == 1
+        result = await conn.execute(
+            sa_select(schema_version_table.c.version).order_by(schema_version_table.c.version)
+        )
+        assert list(result.scalars()) == [1, 2]
 
 
 async def test_multiple_task_executions(store: SQLiteRunStore) -> None:
@@ -296,6 +306,211 @@ async def test_database_rejects_unknown_status_enum_value(store: SQLiteRunStore)
                     config_hash="b" * 64,
                 )
             )
+
+
+async def test_database_rejects_invalid_run_id_characters(store: SQLiteRunStore) -> None:
+    """Database constraints mirror the RunId lowercase-alphanumeric suffix."""
+    with pytest.raises(IntegrityError):
+        async with store._engine.begin() as conn:  # pyright: ignore[reportPrivateUsage]
+            await conn.execute(
+                insert(runs_table).values(
+                    run_id="run-!!!!!!!!!!!!",
+                    spec_id="spec-1",
+                    base_commit="a" * 40,
+                    status="QUEUED",
+                    config_hash="b" * 64,
+                )
+            )
+
+
+@pytest.mark.parametrize(
+    ("base_commit", "config_hash"),
+    [("g" * 40, "b" * 64), ("a" * 40, "!" * 64)],
+)
+async def test_database_rejects_non_hex_hashes(
+    store: SQLiteRunStore, base_commit: str, config_hash: str
+) -> None:
+    """Length alone is insufficient: commit and config hashes must be lowercase hex."""
+    with pytest.raises(IntegrityError):
+        async with store._engine.begin() as conn:  # pyright: ignore[reportPrivateUsage]
+            await conn.execute(
+                insert(runs_table).values(
+                    run_id="run-hexcheck0001",
+                    spec_id="spec-1",
+                    base_commit=base_commit,
+                    status="QUEUED",
+                    config_hash=config_hash,
+                )
+            )
+
+
+async def test_database_rejects_non_numeric_task_id(store: SQLiteRunStore, tmp_path: Path) -> None:
+    """TaskId database constraints require digits after the TASK- prefix."""
+    run = _make_run()
+    await store.create_run(run, _make_event())
+    with pytest.raises(IntegrityError):
+        async with store._engine.begin() as conn:  # pyright: ignore[reportPrivateUsage]
+            await conn.execute(
+                insert(task_executions_table).values(
+                    run_id=run.run_id.value,
+                    task_id="TASK-ABC",
+                    base_commit="a" * 40,
+                    worktree_path=str(tmp_path / "qa-worktree"),
+                    stage="QUEUED",
+                    repair_count=0,
+                    failover_count=0,
+                    version=1,
+                )
+            )
+
+
+def _create_legacy_v1_database(db_path: Path, worktree: Path, config_hash: str) -> None:
+    root = Path(__file__).resolve().parents[2]
+    connection = sqlite3.connect(db_path)
+    try:
+        connection.executescript(
+            (root / "migrations" / "0001_initial.sql").read_text(encoding="utf-8")
+        )
+        connection.execute(
+            "INSERT INTO runs(run_id, spec_id, base_commit, status, config_hash) "
+            "VALUES (?, ?, ?, ?, ?)",
+            ("run-legacy000001", "spec-legacy", "a" * 40, "QUEUED", config_hash),
+        )
+        connection.execute(
+            "INSERT INTO task_executions("
+            "run_id, task_id, base_commit, worktree_path, stage, "
+            "repair_count, failover_count, version"
+            ") VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            (
+                "run-legacy000001",
+                "TASK-001",
+                "a" * 40,
+                str(worktree),
+                "QUEUED",
+                0,
+                0,
+                1,
+            ),
+        )
+        connection.execute(
+            "INSERT INTO events(event_type, timestamp, run_id, task_id, schema_version) "
+            "VALUES (?, datetime('now'), ?, ?, ?)",
+            ("TASK_QUEUED", "run-legacy000001", "TASK-001", 1),
+        )
+        connection.commit()
+    finally:
+        connection.close()
+
+
+async def test_upgrades_legacy_v1_database_and_preserves_data(tmp_path: Path) -> None:
+    """A database created by the previously released V1 migration is upgraded to V2."""
+    db_path = tmp_path / "legacy-v1.db"
+    _create_legacy_v1_database(db_path, tmp_path / "legacy-worktree", "b" * 64)
+
+    store = await SQLiteRunStore.create(db_path)
+    try:
+        snapshot = await store.load_run(RunId("run-legacy000001"))
+        assert snapshot.run.spec_id == "spec-legacy"
+        assert len(snapshot.task_executions) == 1
+        assert snapshot.task_executions[0].task_id == TaskId("TASK-001")
+        assert snapshot.event_count == 1
+        async with store._engine.connect() as conn:  # pyright: ignore[reportPrivateUsage]
+            versions = await conn.execute(
+                sa_select(schema_version_table.c.version).order_by(schema_version_table.c.version)
+            )
+            assert list(versions.scalars()) == [1, 2]
+        with pytest.raises(IntegrityError):
+            async with store._engine.begin() as conn:  # pyright: ignore[reportPrivateUsage]
+                await conn.execute(
+                    insert(runs_table).values(
+                        run_id="run-valid0000001",
+                        spec_id="spec-invalid",
+                        base_commit="a" * 40,
+                        status="QUEUED",
+                        config_hash="tiny",
+                    )
+                )
+    finally:
+        await store.close()
+
+
+async def test_invalid_legacy_v1_upgrade_rolls_back_atomically(tmp_path: Path) -> None:
+    """Invalid legacy data aborts V2 without leaving renamed or partially copied tables."""
+    db_path = tmp_path / "invalid-legacy-v1.db"
+    _create_legacy_v1_database(db_path, tmp_path / "legacy-worktree", "tiny")
+
+    with pytest.raises(IntegrityError):
+        await SQLiteRunStore.create(db_path)
+
+    connection = sqlite3.connect(db_path)
+    try:
+        version = connection.execute("SELECT max(version) FROM schema_version").fetchone()
+        tables = {
+            row[0]
+            for row in connection.execute(
+                "SELECT name FROM sqlite_master WHERE type = 'table'"
+            ).fetchall()
+        }
+        persisted_hash = connection.execute(
+            "SELECT config_hash FROM runs WHERE run_id = 'run-legacy000001'"
+        ).fetchone()
+    finally:
+        connection.close()
+
+    assert version == (1,)
+    assert not any(name.endswith("_v1") for name in tables)
+    assert persisted_hash == ("tiny",)
+
+
+def test_built_wheel_contains_migrations_and_initializes_store(tmp_path: Path) -> None:
+    """The installable wheel carries migrations and can create a fresh SQLite store."""
+    root = Path(__file__).resolve().parents[2]
+    uv_executable = shutil.which("uv")
+    assert uv_executable is not None
+    wheel_dir = tmp_path / "wheel"
+    subprocess.run(  # noqa: S603 - fixed build command in a controlled checkout
+        [uv_executable, "build", "--wheel", "--out-dir", str(wheel_dir)],
+        cwd=root,
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=60,
+    )
+    wheels = tuple(wheel_dir.glob("*.whl"))
+    assert len(wheels) == 1
+    wheel = wheels[0]
+    with zipfile.ZipFile(wheel) as archive:
+        names = set(archive.namelist())
+    assert "ai_software_factory/migrations/0001_initial.sql" in names
+    assert "ai_software_factory/migrations/0002_harden_constraints.sql" in names
+
+    smoke = textwrap.dedent(
+        """
+        import asyncio
+        import sys
+        from pathlib import Path
+
+        sys.path.insert(0, sys.argv[1])
+        from ai_software_factory.adapters.persistence import sqlite as sqlite_module
+        from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
+
+        async def main():
+            assert '.whl/' in str(sqlite_module.__file__)
+            store = await SQLiteRunStore.create(Path(sys.argv[2]))
+            await store.close()
+
+        asyncio.run(main())
+        """
+    )
+    subprocess.run(  # noqa: S603 - current interpreter runs a fixed local smoke script
+        [sys.executable, "-c", smoke, str(wheel), str(tmp_path / "runtime" / "state.db")],
+        cwd=tmp_path,
+        env={"PATH": os.environ.get("PATH", ""), "PYTHONDONTWRITEBYTECODE": "1"},
+        check=True,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
 
 
 def test_load_migrations_skips_non_matching_filenames(
