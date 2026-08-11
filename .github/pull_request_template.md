@@ -25,6 +25,10 @@ Descreva o resultado observável desta task.
 
 Liste os controles exercitados, findings e riscos residuais. Nunca inclua segredo, prompt bruto ou credencial.
 
+## Validação manual
+
+Cole as instruções impressas por `python3 scripts/show_manual_validation.py TASK-NNN`. A validação pode ser executada durante a revisão; ajustes entram como novos commits nesta mesma branch/PR.
+
 ## Regra de branch
 
 - [ ] Este PR tem `base=dev`.
