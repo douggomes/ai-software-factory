@@ -1,0 +1,124 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-software-factory.local/schemas/software-spec.v1.schema.json",
+  "title": "Software SPEC v1",
+  "description": "Canonical JSON schema for the AI Software Factory SPEC contract v1.",
+  "type": "object",
+  "required": ["spec_id", "schema_version", "title", "tasks"],
+  "additionalProperties": false,
+  "properties": {
+    "spec_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "description": "Unique identifier for this SPEC."
+    },
+    "schema_version": {
+      "type": "integer",
+      "const": 1,
+      "description": "Must be 1 for this schema version."
+    },
+    "title": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 512,
+      "description": "Human-readable title of the SPEC."
+    },
+    "tasks": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 200,
+      "description": "Ordered list of tasks in this SPEC.",
+      "items": {
+        "$ref": "#/$defs/task"
+      }
+    }
+  },
+  "$defs": {
+    "task": {
+      "type": "object",
+      "required": [
+        "task_id",
+        "title",
+        "depends_on",
+        "allowed_paths",
+        "acceptance_criteria",
+        "validation_commands"
+      ],
+      "additionalProperties": false,
+      "properties": {
+        "task_id": {
+          "type": "string",
+          "pattern": "^TASK-\\d{3,}$",
+          "description": "Task identifier in TASK-NNN format."
+        },
+        "title": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 512
+        },
+        "depends_on": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "pattern": "^TASK-\\d{3,}$"
+          },
+          "description": "Task IDs this task depends on. Must form a DAG."
+        },
+        "allowed_paths": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string",
+            "minLength": 1
+          },
+          "description": "File globs the task is allowed to modify."
+        },
+        "acceptance_criteria": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/acceptance_criterion"
+          }
+        },
+        "validation_commands": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "$ref": "#/$defs/validation_command"
+          }
+        }
+      }
+    },
+    "acceptance_criterion": {
+      "type": "object",
+      "required": ["ac_id", "description"],
+      "additionalProperties": false,
+      "properties": {
+        "ac_id": {
+          "type": "string",
+          "pattern": "^AC-\\d{3,}$"
+        },
+        "description": {
+          "type": "string",
+          "minLength": 1
+        }
+      }
+    },
+    "validation_command": {
+      "type": "object",
+      "required": ["args"],
+      "additionalProperties": false,
+      "properties": {
+        "args": {
+          "type": "array",
+          "minItems": 1,
+          "items": {
+            "type": "string"
+          },
+          "description": "Command as argument array. Shell strings are prohibited."
+        }
+      }
+    }
+  }
+}
