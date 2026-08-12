@@ -2,9 +2,9 @@
 title: "TASK-005 — ArtifactStore íntegro e consulta de execução"
 task_id: TASK-005
 release: "V0.1"
-status: planned
+status: done
 depends_on: [TASK-004]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "ea6589aa6860038563886da06300c182fba5e749"
 risk_level: high
 ---
 
@@ -19,11 +19,11 @@ Artifacts imutáveis e consultas CLI tornam uma execução auditável sem transc
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
@@ -83,9 +83,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Escrita interrompida não publica artifact e overwrite é rejeitado.
-- [ ] **AC-002** — Symlink, path externo, owner/mode inválido e hash adulterado falham fechados.
-- [ ] **AC-003** — Status/eventos sobrevivem reinício e export NDJSON é reconstruível byte a byte.
+- [x] **AC-001** — Escrita interrompida não publica artifact e overwrite é rejeitado.
+- [x] **AC-002** — Symlink, path externo, owner/mode inválido e hash adulterado falham fechados.
+- [x] **AC-003** — Status/eventos sobrevivem reinício e export NDJSON é reconstruível byte a byte.
 
 ## Matriz de verificação
 

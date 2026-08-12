@@ -2,9 +2,9 @@
 title: "TASK-006 — ProcessRunner seguro e limitado"
 task_id: TASK-006
 release: "V0.1"
-status: planned
+status: done
 depends_on: [TASK-005]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "993d1acba8a8b7d38d36b99194052b2cbd7fc180"
 risk_level: critical
 ---
 
@@ -19,11 +19,11 @@ A Factory executa processos sem shell, com ambiente mínimo, limites e cancelame
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
@@ -82,9 +82,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Metacaracteres permanecem argumento literal e executable/cwd fora da policy são rejeitados.
-- [ ] **AC-002** — Timeout/cancelamento encerra grupo inteiro sem órfãos.
-- [ ] **AC-003** — Segredo-canário, output excessivo e repo não confiável sem isolamento não vazam nem exaurem o host.
+- [x] **AC-001** — Metacaracteres permanecem argumento literal e executable/cwd fora da policy são rejeitados.
+- [x] **AC-002** — Timeout/cancelamento encerra grupo inteiro sem órfãos.
+- [x] **AC-003** — Segredo-canário, output excessivo e repo não confiável sem isolamento não vazam nem exaurem o host.
 
 ## Matriz de verificação
 

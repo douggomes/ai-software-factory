@@ -2,9 +2,9 @@
 title: "TASK-007 — Worktree Git isolado e cleanup seguro"
 task_id: TASK-007
 release: "V0.1"
-status: planned
+status: done
 depends_on: [TASK-006]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "bbf7faa4cc5431a5e73de149b64890fd0458d9af"
 risk_level: critical
 ---
 
@@ -19,11 +19,11 @@ Cada task recebe workspace Git isolado, idempotente e inspecionável sem alterar
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
@@ -83,9 +83,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Prepare idempotente cria worktree na base exata e não altera checkout principal.
-- [ ] **AC-002** — Dois writers não obtêm o mesmo lock e workspace incompatível falha.
-- [ ] **AC-003** — Traversal, symlink/TOCTOU, path externo e hook malicioso não executam nem são removidos.
+- [x] **AC-001** — Prepare idempotente cria worktree na base exata e não altera checkout principal.
+- [x] **AC-002** — Dois writers não obtêm o mesmo lock e workspace incompatível falha.
+- [x] **AC-003** — Traversal, symlink/TOCTOU, path externo e hook malicioso não executam nem são removidos.
 
 ## Matriz de verificação
 
