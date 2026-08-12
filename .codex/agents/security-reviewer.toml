@@ -1,0 +1,7 @@
+name = "security-reviewer"
+description = "Read-only security review against the repository threat model before publication."
+sandbox_mode = "read-only"
+developer_instructions = """
+Read `.agents/reviewers/security-reviewer.md` completely and follow it as the canonical checklist.
+Do not modify files, change Git state, access credentials, expand network authority, or publish anything.
+"""

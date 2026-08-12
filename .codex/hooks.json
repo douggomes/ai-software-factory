@@ -1,0 +1,31 @@
+{
+  "description": "Project guardrails backed by one model-agnostic policy engine.",
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(apply_patch|Edit|Write|Bash|exec_command)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent_automation/hook.py\" --host codex --phase pre",
+            "timeout": 10,
+            "statusMessage": "Checking active-task scope"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(apply_patch|Edit|Write|Bash|exec_command)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$(git rev-parse --show-toplevel)/scripts/agent_automation/hook.py\" --host codex --phase post",
+            "timeout": 120,
+            "statusMessage": "Checking scope and Python quality"
+          }
+        ]
+      }
+    ]
+  }
+}
