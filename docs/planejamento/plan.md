@@ -263,6 +263,15 @@ sequenceDiagram
 ```text
 ai-software-factory/
 ├── AGENTS.md
+├── CLAUDE.md
+├── .agents/
+│   ├── skills/
+│   └── reviewers/
+├── .claude/
+│   ├── skills/
+│   └── agents/
+├── .codex/
+│   └── agents/
 ├── pyproject.toml
 ├── uv.lock
 ├── factory.example.toml
@@ -379,7 +388,7 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 
 | Release | Tasks | Valor entregue | Gate de release |
 |---|---:|---|---|
-| V0.1 | 1–14 | Pipeline real com OpenCode, worktree, estado, gates e failover sem perder diff | Fake #1 quota → Fake #2 continua; OpenCode passa contract/security tests; dossier V0.1 |
+| V0.1 | 1–14, 32 | Pipeline real com automação agnóstica, OpenCode, worktree, estado, gates e failover sem perder diff | Claude/Codex compartilham política; Fake #1 quota → Fake #2 continua; OpenCode passa contract/security tests; dossier V0.1 |
 | V0.2 | 15–18 | Codex reviewer, repair limitado e aprovação/commit seguros | ACs estruturados; repair revalida; approval exata e TOCTOU testado |
 | V0.3 | 19–22 | Contexto, Claude, Ollama e perfis reproduzíveis | Manifest/hash estáveis; Ollama loopback; fallback sem custo oculto; dossier V0.3 |
 | V0.4 | 23–24 | MCP semântico e observabilidade segura | MCP stdio isolado; traces/métricas redigidos; dossier V0.4 |
@@ -400,7 +409,8 @@ Cada arquivo segue o [template normativo](task-template.md) e é validado por `p
 | TASK-005 | [task5.md](task5.md) | ArtifactStore e consultas auditáveis | 4 |
 | TASK-006 | [task6.md](task6.md) | ProcessRunner seguro e limitado | 5 |
 | TASK-007 | [task7.md](task7.md) | Worktree/lock/cleanup seguros | 6 |
-| TASK-008 | [task8.md](task8.md) | Gates determinísticos e snapshots | 7 |
+| TASK-032 | [task32.md](task32.md) | Automação agnóstica de agentes | 7 |
+| TASK-008 | [task8.md](task8.md) | Gates determinísticos e snapshots | 32 |
 | TASK-009 | [task9.md](task9.md) | Pipeline E2E offline com FakeWorker | 8 |
 | TASK-010 | [task10.md](task10.md) | Taxonomia e seleção estática | 9 |
 | TASK-011 | [task11.md](task11.md) | Circuit breaker e provider health | 10 |
