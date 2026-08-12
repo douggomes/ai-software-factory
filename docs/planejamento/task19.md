@@ -41,7 +41,7 @@ Cada papel recebe contexto mínimo, reproduzível, com origem/hash e sem elevar 
 - `schemas/context-manifest.v1.schema.json`
 - `tests/unit/context/**`
 - `tests/security/test_context_boundaries.py`
-- `docs/adr/0004-deterministic-context-before-embeddings.md`
+- `docs/adr/0006-deterministic-context-before-embeddings.md`
 
 Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 

@@ -1,3 +1,0 @@
-# Keep generated Graphify payloads available without dominating GitHub diffs.
-graphify-out/graph.html linguist-generated=true
-graphify-out/graph.json linguist-generated=true

@@ -41,7 +41,7 @@ Workers consultam task, diff e validação por tools tipadas e mínimas, sem she
 - `tests/contract/mcp/**`
 - `tests/integration/test_mcp_stdio.py`
 - `tests/security/test_mcp_isolation.py`
-- `docs/adr/0005-semantic-mcp-no-generic-shell.md`
+- `docs/adr/0007-semantic-mcp-no-generic-shell.md`
 
 Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 

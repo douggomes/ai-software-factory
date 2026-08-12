@@ -11,11 +11,12 @@ risk_level: high
 # TASK-022 — Perfis de execução, fallback e release V0.3
 
 > [!important] Contrato de execução por IA
-> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md) e [security-review.md](security-review.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
+> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md), [security-review.md](security-review.md) e [ADR-0005](../adr/0005-cloud-only-model-runtime.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
 
 ## Valor entregue
 
-Papéis, workers e fallback são configuráveis por perfis fechados, e a V0.3 é reproduzível com ou sem Ollama.
+Papéis, workers cloud e fallback são configuráveis por perfis fechados, e a
+V0.3 é reproduzível sem chamada live na suite padrão.
 
 ## Definition of Ready
 
@@ -27,7 +28,7 @@ Papéis, workers e fallback são configuráveis por perfis fechados, e a V0.3 é
 
 ## Precondições
 
-- TASK-021 aprovada com planner local.
+- TASK-021 aprovada com planner cloud agnóstico.
 - Baseline fixado no commit aprovado da TASK-021.
 - OpenCode, Codex e Claude contract suites estão verdes offline.
 
@@ -41,7 +42,7 @@ Papéis, workers e fallback são configuráveis por perfis fechados, e a V0.3 é
 - `tests/unit/test_execution_profiles.py`
 - `tests/release/test_v0_3.py`
 - `docs/releases/v0.3.md`
-- `docs/runbooks/local-planner.md`
+- `docs/runbooks/cloud-planner.md`
 
 Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
@@ -58,23 +59,25 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|
 | `ExecutionProfile` | Mapeia role→ordered workers, authority, cost/network policy e fallback. |
 | `ProfileResolver.resolve(name: str, capabilities: Snapshot) -> ResolvedProfile` | Determinístico e explicável; config inválida falha no preflight. |
-| `planner fallback` | Ollama ausente → `DeterministicMinimalPlan`; nunca escolhe provider pago oculto. |
+| `planner fallback` | nenhum worker cloud elegível/disponível → `DeterministicMinimalPlan`; nunca escolhe provider ou custo oculto. |
 
 ## Defaults e decisões fechadas
 
 | Chave | Valor normativo |
 |---|---|
 | `default_profile` | subscription-safe |
-| `offline` | fakes + Ollama opcional; rede externa deny |
-| `subscription-safe` | sem API key incremental |
+| `offline` | somente fakes/fixtures; zero inferência ou rede de provider |
+| `subscription-safe` | CLIs cloud com sessão oficial; sem API key incremental gerida pela Factory |
 | `benchmark` | budget explícito; nunca default |
 | `planner_fallback` | deterministic-minimal |
+| `inference_mode` | cloud-only; endpoint local/self-hosted deny |
+| `data_egress` | context view mínima; provider, classificação e retention explícitos no profile |
 
 ## Passos de implementação
 
 1. Fechar modelos/profiles e exemplos TOML completos.
 2. Implementar resolver/fallback sem branches de provider no Core.
-3. Testar matriz de capabilities/custo/ausência Ollama.
+3. Testar matriz de capabilities, custo e indisponibilidade dos workers cloud.
 4. Executar release gate e produzir dossier V0.3.
 
 ## Riscos e controles
@@ -86,8 +89,8 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 ## Critérios de aceite
 
 - [ ] **AC-001** — Cada perfil resolve os mesmos workers/autoridades para o mesmo snapshot e explica fallback.
-- [ ] **AC-002** — Ausência de Ollama usa plano mínimo; nenhuma API key/custo/rede não declarada é ativada.
-- [ ] **AC-003** — Suite V0.3 comprova contexto, Claude, Ollama fake e profiles com dossier reproduzível.
+- [ ] **AC-002** — Ausência de worker cloud elegível usa plano mínimo; nenhum endpoint local, API key, custo ou rede não declarada é ativado.
+- [ ] **AC-003** — Suite V0.3 comprova contexto, fixtures OpenCode/Codex/Claude, planner fake e profiles com dossier reproduzível.
 
 ## Matriz de verificação
 
@@ -102,13 +105,13 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 1. `uv run pytest tests/unit/test_execution_profiles.py::test_profiles_are_deterministic_and_explained -q`
    Esperado: Perfis resolvem workers/autoridades e fallback de modo estável.
 2. `uv run pytest tests/release/test_v0_3.py -q`
-   Esperado: O gate offline da V0.3 passa com e sem Ollama.
+   Esperado: O gate offline da V0.3 passa sem chamada live e rejeita configuração de inferência local/self-hosted.
 
 O agente imprime esta seção com `python3 scripts/show_manual_validation.py TASK-022` antes de publicar o draft PR.
 
 ## Fora de escopo
 
-Router histórico, download de modelo, perfis arbitrários e release/tag pelo agente.
+Router histórico, inferência local/self-hosted, download de modelo, perfis arbitrários e release/tag pelo agente.
 
 ## Evidência de conclusão
 

@@ -1,6 +1,11 @@
 # AI Software Factory
 
-Factory local, assíncrona e auditável para orquestrar modelos de IA durante o desenvolvimento de software.
+Factory executada localmente, assíncrona e auditável para orquestrar coding
+agents com inferência em nuvem durante o desenvolvimento de software.
+
+OpenCode, Codex e Claude Code são os únicos runtimes de modelo previstos para
+a V1.1. Inferência local ou self-hosted não é suportada, conforme o
+[ADR-0005](docs/adr/0005-cloud-only-model-runtime.md).
 
 O repositório está em fase de implementação. A execução por agentes é governada por [AGENTS.md](AGENTS.md), e o backlog normativo está em [docs/planejamento/plan.md](docs/planejamento/plan.md).
 

@@ -11,7 +11,7 @@ risk_level: critical
 # TASK-015 — Adapter Codex com sandbox explícito
 
 > [!important] Contrato de execução por IA
-> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md) e [security-review.md](security-review.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
+> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md), [security-review.md](security-review.md) e [ADR-0005](../adr/0005-cloud-only-model-runtime.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
 
 ## Valor entregue
 
@@ -64,7 +64,8 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|
 | `reviewer_sandbox` | read-only |
 | `implementer_sandbox` | workspace-write |
-| `network` | denied salvo task futura explícita |
+| `provider_transport` | permitido somente ao Codex CLI em profile live explícito; web/tools continuam deny |
+| `inference_mode` | cloud-only; endpoint local/self-hosted deny |
 | `auth` | sessão oficial existente; nunca copiar `auth.json` |
 | `smoke` | opt-in |
 
@@ -85,7 +86,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 - [ ] **AC-001** — Fixtures Codex passam a contract suite sem tipo específico escapar ao Core.
 - [ ] **AC-002** — Reviewer não escreve e project/diff injection não altera sandbox/rede/credenciais.
-- [ ] **AC-003** — Preflight detecta auth sem copiar arquivo; malformed/oversized output falha limitado.
+- [ ] **AC-003** — Preflight detecta auth sem copiar arquivo, rejeita endpoint local/self-hosted e limita output malformed/oversized.
 
 ## Matriz de verificação
 
@@ -93,7 +94,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|---|---|
 | AC-001 | `uv run pytest tests/contract/agents/codex -q` | AgentWorker contract completo | fixture/result matrix |
 | AC-002 | `uv run pytest tests/security/test_codex_policy.py::test_injected_diff_cannot_change_sandbox -q` | worktree/read-only e spies externos intactos | sandbox evidence |
-| AC-003 | `uv run pytest tests/security/test_codex_policy.py::test_auth_and_output_boundaries -q` | nenhum auth artifact; erro tipado | preflight + artifact scan |
+| AC-003 | `uv run pytest tests/security/test_codex_policy.py::test_auth_and_output_boundaries -q` | nenhum auth artifact ou rota não cloud; erro tipado | preflight + artifact scan |
 
 ## Validação manual no terminal
 

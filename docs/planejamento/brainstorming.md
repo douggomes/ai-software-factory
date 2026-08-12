@@ -33,7 +33,7 @@ Os dois arquivos foram lidos integralmente. O V0.1 é o contrato mínimo de conf
 | Claude Code | 2.1.227 | Adapter entra após a V0.2 |
 | Codex CLI | 0.147.0, autenticado via ChatGPT | Reviewer inicial e rota alternativa |
 | OpenCode | 1.18.14 | Primeiro worker real |
-| Ollama | não instalado | Não bloqueia a V0.1; entra apenas na V0.3 |
+| Inferência | CLIs cloud disponíveis | OpenCode, Codex e Claude Code são as únicas rotas de modelo da V1.1 |
 | Repositório | diretório vazio e ainda sem `.git` | Bootstrap é a primeira fatia de valor |
 
 ## Contradições encontradas e resolução
@@ -124,12 +124,22 @@ Uma versão só é marcada quando seu cenário end-to-end e seus gates passam. Q
 
 Os workers executados pelo produto Factory nunca fazem commit/push/merge; essa restrição protege o runtime agentic entregue pelo projeto. Ela não se aplica ao agente de desenvolvimento deste repositório: após os gates, esse agente cria commit, publica a branch e abre/atualiza automaticamente um draft PR para `dev`, conforme [AGENTS.md](../../AGENTS.md). Merge, tag, release e promoção para `main` continuam humanos.
 
+### D-013 — Inferência exclusivamente em nuvem
+
+OpenCode, Codex e Claude Code são a allowlist fechada de runtimes de modelo da
+V1.1. A Factory não instala, baixa, descobre nem consulta modelos ou endpoints
+de inferência locais. O planner reutiliza o contrato `AgentWorker` desses CLIs
+em papel read-only, sem criar um adapter HTTP ou um segundo caminho de
+autoridade. Testes permanecem offline por fixtures e fakes determinísticos;
+execução real exige perfil live explícito, autenticação oficial do CLI e
+transporte de provider isolado de web/tools genéricos. A decisão normativa está
+registrada no [ADR-0005](../adr/0005-cloud-only-model-runtime.md).
+
 ## Hipóteses não bloqueantes
 
 - O primeiro projeto-laboratório será uma API Python simples de tickets.
 - O primeiro worker real será OpenCode; Codex será o primeiro reviewer.
 - O modo `no_incremental_cost` será padrão, mas configurável.
-- Ausência de Ollama desabilita somente papéis locais; não falha o Core.
 - Os caminhos do factory home e do laboratório serão configuráveis e nunca hardcoded para um usuário.
 
 ## Questões adiadas de forma consciente

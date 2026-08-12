@@ -40,7 +40,7 @@ O SSDF 1.2 está em draft; até publicação final, 1.1 é a baseline normativa 
 - banco SQLite, events, prompts, context manifests, diffs e artifacts;
 - identidade do run, base commit, locks, decisões, aprovações e evidências;
 - disponibilidade do host, quotas, tokens, tempo e custo de providers;
-- integridade de dependências, modelos locais, binaries e ferramentas MCP.
+- integridade de dependências, CLIs de coding agent e ferramentas MCP.
 
 ## 4. Entradas sempre não confiáveis
 
@@ -78,6 +78,7 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 | Confused deputy/cross-run | autorização por run/task em toda tool; objetos não adivinháveis; locks; sessão MCP isolada; sem cache cruzado | 4–5, 7, 11–12, 23, 27, 30 |
 | DoS e consumo sem limite | timeout, cancelamento, quotas, bytes/tokens/processos limitados, backpressure e circuit breaker | 2, 6, 8, 11–13, 15, 20–24, 28, 30 |
 | Poisoning do router/contexto | provenance/hash; baseline estático; dados históricos validados; feature flag; rollback e explicação | 19, 21, 29 |
+| Exposição de código/dados ao provider cloud | context view mínima; SecretGate antes do CLI; profile fixa provider, classificação e retention; live explícito; provenance sem payload | 8, 13, 15, 19–22, 24, 31 |
 | Artifacts/DB adulterados | permissões locais; SHA-256; append-only events; migrations; integridade na leitura; backup/restore testado | 4–5, 8, 12, 24, 27–28 |
 | Cascata entre agentes/tasks | budgets independentes, cancellation estruturada, bulkheads, lock por task e falha localizada | 11–12, 17, 27–30 |
 | Vazamento de hidden tests | armazenamento fora do contexto/worktree; injeção somente após worker; isolamento do benchmark | 26, 31 |
@@ -108,7 +109,10 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 - resposta do modelo é proposta não confiável, validada por schema e por gates independentes;
 - prompt, response e context têm limites de bytes, tokens, profundidade e cardinalidade;
 - adapters não copiam homes/arquivos de autenticação; credenciais permanecem no mecanismo oficial do provider;
-- Ollama escuta em loopback por padrão; endpoint remoto exige TLS, autenticação e decisão explícita;
+- inferência de runtime é restrita aos CLIs cloud OpenCode, Codex e Claude Code; endpoint local ou self-hosted falha fechado;
+- rede de provider é autorizada somente ao processo do CLI em perfil live explícito; web e rede de tools permanecem negadas;
+- somente context view mínima, classificada e aprovada pelo profile pode sair do host; SecretGate bloqueia antes do CLI;
+- profile live registra provider, modelo, região/retention declarada, budget e hashes de contexto/config sem persistir payload;
 - MCP expõe tools semânticas mínimas, autoriza novamente cada chamada e não registra tools dinamicamente a partir do modelo;
 - toda ação material é vinculada a run/task/attempt e a autoridade não é herdada de texto ou output anterior.
 
@@ -152,9 +156,10 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 ## 10. Risco residual aceito para V1.1
 
 - CLIs de providers continuam parte da trusted computing base e podem mudar comportamento entre versões;
+- rede concedida ao CLI não garante restrição de endpoint se o próprio binary estiver comprometido;
 - sandbox oferecido por provider ou macOS não é automaticamente equivalente a VM/container;
 - prompt injection não é eliminável apenas por prompting; o dano é contido por autoridade mínima e validação determinística;
 - laboratório mono-tenant não resolve requisitos de autenticação, segregação e privacidade de um serviço multiusuário;
-- modelos locais e remotos podem produzir código vulnerável; gates e revisão continuam obrigatórios.
+- modelos em nuvem podem produzir código vulnerável; gates e revisão continuam obrigatórios.
 
 Qualquer expansão para serviço remoto, múltiplos usuários, repositórios públicos arbitrários ou execução privilegiada exige novo threat model antes da implementação.

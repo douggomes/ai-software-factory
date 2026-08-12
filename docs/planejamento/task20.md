@@ -11,7 +11,7 @@ risk_level: critical
 # TASK-020 — Adapter Claude Code protegido
 
 > [!important] Contrato de execução por IA
-> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md) e [security-review.md](security-review.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
+> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md), [security-review.md](security-review.md) e [ADR-0005](../adr/0005-cloud-only-model-runtime.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
 
 ## Valor entregue
 
@@ -65,7 +65,8 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | `api_key_guard` | bloqueia `ANTHROPIC_API_KEY` quando no_incremental_cost |
 | `project_instructions` | dados não confiáveis; policy Factory vence |
 | `external_directory` | deny |
-| `network` | deny salvo autorização futura |
+| `provider_transport` | permitido somente ao Claude CLI em profile live explícito; web/tools continuam deny |
+| `inference_mode` | cloud-only; endpoint local/self-hosted deny |
 | `smoke` | opt-in |
 
 ## Passos de implementação
@@ -85,7 +86,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 - [ ] **AC-001** — Fixtures Claude passam AgentWorker contract incluindo retry sem duplicar attempt.
 - [ ] **AC-002** — Reviewer não escreve; implementer não acessa externo; project injection não eleva tool/rede/Git.
-- [ ] **AC-003** — API key incremental e output malformed/oversized falham antes de vazamento ou ação.
+- [ ] **AC-003** — API key incremental, endpoint local/self-hosted e output malformed/oversized falham antes de vazamento ou ação.
 
 ## Matriz de verificação
 
@@ -93,7 +94,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|---|---|
 | AC-001 | `uv run pytest tests/contract/agents/claude -q` | contract suite completa | fixture/result matrix |
 | AC-002 | `uv run pytest tests/security/test_claude_policy.py::test_project_instruction_cannot_escalate -q` | spies externos e Git zerados | permission audit |
-| AC-003 | `uv run pytest tests/security/test_claude_policy.py::test_billing_and_output_boundaries -q` | erro tipado e artifacts sem canário | preflight + secret scan |
+| AC-003 | `uv run pytest tests/security/test_claude_policy.py::test_billing_and_output_boundaries -q` | rota não cloud bloqueada, erro tipado e artifacts sem canário | preflight + secret scan |
 
 ## Validação manual no terminal
 
@@ -106,7 +107,7 @@ O agente imprime esta seção com `python3 scripts/show_manual_validation.py TAS
 
 ## Fora de escopo
 
-Agent SDK embutido, bare mode padrão, planner local e roteamento por score.
+Agent SDK embutido, bare mode padrão, implementação do planner e roteamento por score.
 
 ## Evidência de conclusão
 
