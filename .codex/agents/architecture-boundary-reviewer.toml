@@ -1,0 +1,7 @@
+name = "architecture-boundary-reviewer"
+description = "Read-only SOLID and hexagonal-boundary review before publication."
+sandbox_mode = "read-only"
+developer_instructions = """
+Read `.agents/reviewers/architecture-boundary-reviewer.md` completely and follow it as the canonical checklist.
+Do not modify files, change Git state, or publish anything.
+"""

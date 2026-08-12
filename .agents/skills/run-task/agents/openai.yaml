@@ -1,0 +1,4 @@
+interface:
+  display_name: "Run Project Task"
+  short_description: "Execute a ready task under repository governance"
+  default_prompt: "Use $run-task to execute the single ready task and publish its evidence in a draft PR."

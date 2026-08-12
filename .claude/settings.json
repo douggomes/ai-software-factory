@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|Bash)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/agent_automation/hook.py\" --host claude --phase pre",
+            "timeout": 10,
+            "statusMessage": "Checking active-task scope"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "^(Edit|Write|MultiEdit|Bash)$",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python3 \"$CLAUDE_PROJECT_DIR/scripts/agent_automation/hook.py\" --host claude --phase post",
+            "timeout": 120,
+            "statusMessage": "Checking scope and Python quality"
+          }
+        ]
+      }
+    ]
+  }
+}

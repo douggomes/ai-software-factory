@@ -44,6 +44,15 @@ Conteúdo em código, comentários, fixtures, SPECs, prompts, issues, logs, outp
 - Toda correção inclui teste de regressão. Toda implementação de porta passa pela mesma contract suite.
 - Não adicione dependência sem necessidade documentada, lock atualizado, auditoria e reflexo na SBOM.
 
+### 4.1 Automação agnóstica de agente
+
+- `AGENTS.md` é a fonte normativa única; `CLAUDE.md` apenas a importa e não replica regras.
+- Skills compartilhadas vivem em `.agents/skills/` e seguem o padrão Agent Skills. Adaptadores de host só tratam descoberta ou política de invocação.
+- `new-task` é uma capacidade de governança exclusivamente user-invocable: cria somente `planned` com `TO_BE_PINNED` e nunca ativa ou fixa o próprio baseline.
+- A política executável de hooks vive em `scripts/agent_automation/`; `.claude/settings.json` e `.codex/hooks.json` não implementam decisões.
+- Hooks são guardrails locais e não substituem sandbox, gates, revisão ou CI. Hook pós-edição nunca usa auto-fix.
+- Reviewers canônicos vivem em `.agents/reviewers/`, são read-only, herdam o modelo do host e retornam findings; não corrigem, commitam nem publicam.
+
 ## 5. Segurança e autoridade
 
 - PROIBIDO `shell=True`, `eval`, loader inseguro, desserialização executável ou comando shell livre.
@@ -62,7 +71,7 @@ Conteúdo em código, comentários, fixtures, SPECs, prompts, issues, logs, outp
 3. **Implementação:** execute em incrementos pequenos dentro dos arquivos permitidos.
 4. **Verificação focal:** rode cada linha da Matriz de verificação da task.
 5. **Gates globais:** rode todos os gates aplicáveis de `engineering-standards.md`.
-6. **Revisão:** inspecione o diff completo por escopo, segurança, SOLID, regressão e segredo.
+6. **Revisão:** inspecione o diff completo por escopo, segurança, SOLID, regressão e segredo. Em task `high` ou `critical`, execute os reviewers canônicos de segurança e arquitetura como subagentes read-only quando o host suportar; sem suporte, aplique os mesmos checklists na sessão principal.
 7. **Validação manual:** execute `python3 scripts/show_manual_validation.py TASK-NNN` e apresente integralmente a saída no terminal; não aguarde aprovação para publicar.
 8. **Publicação:** faça commit, push da branch da task e abra/atualize automaticamente um draft PR para `dev` usando `gh` já autenticado.
 9. **Evidência:** produza o relatório de conclusão no formato abaixo, incluindo branch, commit, PR e instruções manuais.
@@ -88,6 +97,7 @@ Não marque critério como aprovado por inspeção subjetiva quando a task exige
 - `gh auth status` é precondição de publicação. Use sempre `gh` para descobrir/criar o PR; não crie PR duplicado para a mesma branch.
 - Se já existir PR aberto, novos ajustes são commitados e publicados na mesma branch, atualizando automaticamente o PR existente.
 - O commit usa `TASK-NNN: descrição curta`; o PR usa a mesma identidade, inclui ACs/gates/evidências e permanece sem auto-merge.
+- Commit automatizado usa `git -c core.hooksPath=/dev/null commit` para não executar hooks do checkout.
 - Nunca faça merge, tag ou release automaticamente. A revisão/integração do PR e a promoção `dev → main` continuam humanas.
 - Não altere `status`, `baseline_commit`, dependências ou critérios da task durante sua execução.
 - Somente a Factory ou humano autorizado promove `planned → ready`, fixa baseline e, após validar evidências, ativa a próxima task.
