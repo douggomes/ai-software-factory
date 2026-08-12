@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import sqlite3
+import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
@@ -22,8 +23,13 @@ from pathlib import Path
 from typing import Final
 
 from ai_software_factory import __version__
-from ai_software_factory.adapters.persistence.artifact_store import SqliteEventLogReader
+from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
+from ai_software_factory.adapters.persistence.artifact_store import (
+    FilesystemArtifactStore,
+    SqliteEventLogReader,
+)
 from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
+from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
 from ai_software_factory.application.queries import (
     RunEventsQuery,
     RunStatusQuery,
@@ -33,13 +39,15 @@ from ai_software_factory.application.queries import (
 from ai_software_factory.application.spec_parser import SpecParseError, SpecParser
 from ai_software_factory.application.spec_validator import SpecValidator
 from ai_software_factory.config import ConfigError, Settings
-from ai_software_factory.core.ids import RunId
+from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
     ValidationReport,
     canonical_json,
 )
+from ai_software_factory.core.workspace_models import Workspace, WorkspaceSnapshot
 from ai_software_factory.ports.persistence import RunNotFoundError
+from ai_software_factory.ports.workspace import WorkspaceError
 
 #: Executable name probed for each supported worker/reviewer CLI. Presence is
 #: checked with ``shutil.which`` only; the executable is never invoked.
@@ -57,6 +65,11 @@ _EXIT_NOT_FOUND: Final[int] = 1
 _FACTORY_HOME_ENV: Final[str] = "AIF_FACTORY_HOME"
 _DEFAULT_FACTORY_HOME: Final[Path] = Path.home() / ".aifactory"
 _STATE_DB_NAME: Final[str] = "state.db"
+_WORKTREE_DIR_NAME: Final[str] = "worktrees"
+_LOCK_DIR_NAME: Final[str] = "locks"
+_GIT_HOOKS_CONFIG: Final[str] = "core.hooksPath=/dev/null"
+_GIT_INSPECT_TIMEOUT_SECONDS: Final[float] = 5.0
+_MAX_WORKSPACE_DISCOVERY_ENTRIES: Final[int] = 256
 
 
 @dataclass(frozen=True, slots=True)
@@ -305,6 +318,185 @@ def _run_events_command(run_id_raw: str, *, factory_home: Path | None) -> int:
     return _EXIT_VALID
 
 
+def _run_workspace_inspect_command(run_id_raw: str, *, factory_home: Path) -> int:
+    manager: GitWorktreeManager | None = None
+    try:
+        run_id = _parse_run_id(run_id_raw)
+        git_executable = _resolve_git_executable()
+        candidates = _discover_workspace_paths(factory_home, run_id)
+        if not candidates:
+            print(f"error: no workspace found for {run_id.value}", file=sys.stderr)
+            return _EXIT_NOT_FOUND
+        artifact_store = FilesystemArtifactStore(factory_home)
+        manager = GitWorktreeManager(
+            AsyncioProcessRunner(artifact_store), artifact_store, git_executable
+        )
+        snapshots = asyncio.run(
+            _inspect_workspace_candidates(manager, factory_home, git_executable, run_id, candidates)
+        )
+    except (OSError, ValueError, WorkspaceError) as error:
+        print(f"error: workspace inspection failed: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    finally:
+        if manager is not None:
+            manager.close()
+    print(
+        json.dumps(
+            {
+                "run_id": run_id.value,
+                "workspaces": [
+                    {
+                        "base_commit": snapshot.head_commit,
+                        "branch": snapshot.branch_name,
+                        "changed_files": list(snapshot.changed_files),
+                        "clean": snapshot.clean,
+                        "diff_stat": snapshot.diff_stat,
+                        "lock": str(snapshot.workspace.lock_path),
+                        "path": str(snapshot.workspace.worktree_path),
+                        "repository": str(snapshot.workspace.repository),
+                    }
+                    for snapshot in snapshots
+                ],
+            },
+            indent=2,
+            sort_keys=True,
+        )
+    )
+    return _EXIT_VALID
+
+
+async def _inspect_workspace_candidates(
+    manager: GitWorktreeManager,
+    factory_home: Path,
+    git_executable: Path,
+    run_id: RunId,
+    candidates: tuple[Path, ...],
+) -> tuple[WorkspaceSnapshot, ...]:
+    snapshots: list[WorkspaceSnapshot] = []
+    for worktree_path in candidates:
+        repository_raw = _read_only_git(
+            git_executable, worktree_path, ("rev-parse", "--git-common-dir")
+        )
+        common_git_dir = Path(repository_raw)
+        if not common_git_dir.is_absolute():
+            common_git_dir = worktree_path / common_git_dir
+        repository = _canonical_cli_directory(common_git_dir, "Git common directory").parent
+        base_commit = _read_only_git(git_executable, worktree_path, ("rev-parse", "HEAD"))
+        branch_name = _read_only_git(
+            git_executable, worktree_path, ("rev-parse", "--abbrev-ref", "HEAD")
+        )
+        task_id = _parse_task_id(worktree_path.name)
+        relative = worktree_path.relative_to(factory_home / _WORKTREE_DIR_NAME)
+        lock_path = factory_home / _LOCK_DIR_NAME / relative.parent / f"{task_id.value}.lock"
+        workspace = Workspace(
+            repository=repository,
+            factory_home=factory_home,
+            worktree_path=worktree_path,
+            lock_path=lock_path,
+            run_id=run_id,
+            task_id=task_id,
+            base_commit=base_commit,
+            branch_name=branch_name,
+        )
+        snapshots.append(await manager.inspect(workspace))
+    return tuple(snapshots)
+
+
+def _resolve_git_executable() -> Path:
+    executable = shutil.which("git")
+    if executable is None:
+        raise WorkspaceError("git executable is unavailable")
+    return Path(executable).resolve(strict=True)
+
+
+def _discover_workspace_paths(factory_home: Path, run_id: RunId) -> tuple[Path, ...]:
+    root = _canonical_cli_directory(factory_home, "factory home") / _WORKTREE_DIR_NAME
+    if not root.exists():
+        return ()
+    _assert_real_directory(root, "worktree root")
+    candidates: list[Path] = []
+    for repository_dir in _bounded_real_directories(root, "repository directory"):
+        run_dir = repository_dir / run_id.value
+        if not run_dir.exists():
+            continue
+        _assert_real_directory(run_dir, "run directory")
+        candidates.extend(_bounded_real_directories(run_dir, "task workspace"))
+    return tuple(sorted(candidates))
+
+
+def _bounded_real_directories(path: Path, label: str) -> tuple[Path, ...]:
+    entries = tuple(sorted(path.iterdir(), key=lambda item: item.name))
+    if len(entries) > _MAX_WORKSPACE_DISCOVERY_ENTRIES:
+        raise WorkspaceError(f"too many entries while reading {label}")
+    directories: list[Path] = []
+    for entry in entries:
+        _assert_real_directory(entry, label)
+        directories.append(entry)
+    return tuple(directories)
+
+
+def _assert_real_directory(path: Path, label: str) -> None:
+    try:
+        path_stat = os.lstat(path)
+    except OSError as error:
+        raise WorkspaceError(f"cannot inspect {label}") from error
+    if stat.S_ISLNK(path_stat.st_mode) or not stat.S_ISDIR(path_stat.st_mode):
+        raise WorkspaceError(f"{label} contains an unsafe entry")
+
+
+def _canonical_cli_directory(path: Path, label: str) -> Path:
+    if not path.is_absolute():
+        raise WorkspaceError(f"{label} must be absolute")
+    current = Path(path.anchor)
+    for part in path.parts[1:]:
+        current /= part
+        try:
+            if stat.S_ISLNK(os.lstat(current).st_mode):
+                raise WorkspaceError(f"{label} contains a symlink")
+        except OSError as error:
+            raise WorkspaceError(f"cannot inspect {label}") from error
+    try:
+        resolved = path.resolve(strict=True)
+        if not stat.S_ISDIR(os.lstat(resolved).st_mode):
+            raise WorkspaceError(f"{label} is not a directory")
+    except OSError as error:
+        raise WorkspaceError(f"cannot resolve {label}") from error
+    return resolved
+
+
+def _parse_task_id(raw: str) -> TaskId:
+    return TaskId(raw)
+
+
+def _read_only_git(executable: Path, cwd: Path, args: tuple[str, ...]) -> str:
+    completed = subprocess.run(  # noqa: S603 - fixed Git executable and argv, no shell
+        [
+            str(executable),
+            "-c",
+            _GIT_HOOKS_CONFIG,
+            *args,
+        ],
+        cwd=cwd,
+        env={
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "HOME": str(cwd),
+            "PATH": "/usr/bin:/bin",
+        },
+        capture_output=True,
+        text=True,
+        timeout=_GIT_INSPECT_TIMEOUT_SECONDS,
+        check=False,
+        shell=False,
+    )
+    if completed.returncode != 0:
+        raise WorkspaceError(f"Git inspection failed: {args[0]}")
+    value = completed.stdout.strip()
+    if not value:
+        raise WorkspaceError(f"Git inspection returned empty output: {args[0]}")
+    return value
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(prog="aif", description="AI Software Factory CLI")
     parser.add_argument("--version", action="version", version=__version__)
@@ -337,23 +529,31 @@ def build_parser() -> argparse.ArgumentParser:
     )
     events.add_argument("run_id", type=str, help="Run identifier (run-xxxxxxxxxxxx)")
 
+    workspace = subcommands.add_parser("workspace", help="Inspect isolated task workspaces")
+    workspace_sub = workspace.add_subparsers(dest="workspace_command")
+    inspect = workspace_sub.add_parser("inspect", help="Inspect workspaces for one run")
+    inspect.add_argument("run_id", type=str, help="Run identifier (run-xxxxxxxxxxxx)")
+
     return parser
 
 
 def _dispatch(args: argparse.Namespace, factory_home: Path) -> int | None:
+    result: int | None = None
     if args.command == "doctor":
         report = build_doctor_report(default_probes())
         print(json.dumps(report, indent=2, sort_keys=True))
-        return 0
-    if args.command == "spec":
+        result = 0
+    elif args.command == "spec":
         if args.spec_command == "validate":
-            return _run_spec_validate(args.path, args.task, args.json)
-        return None
-    if args.command == "status":
-        return _run_status_command(args.run_id, as_json=args.json, factory_home=factory_home)
-    if args.command == "events":
-        return _run_events_command(args.run_id, factory_home=factory_home)
-    return None
+            result = _run_spec_validate(args.path, args.task, args.json)
+    elif args.command == "status":
+        result = _run_status_command(args.run_id, as_json=args.json, factory_home=factory_home)
+    elif args.command == "events":
+        result = _run_events_command(args.run_id, factory_home=factory_home)
+    elif args.command == "workspace":
+        if args.workspace_command == "inspect":
+            result = _run_workspace_inspect_command(args.run_id, factory_home=factory_home)
+    return result
 
 
 def main(argv: Sequence[str] | None = None) -> int:
