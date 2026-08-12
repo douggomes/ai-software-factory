@@ -2,9 +2,9 @@
 title: "TASK-008 — Gates determinísticos e snapshots"
 task_id: TASK-008
 release: "V0.1"
-status: planned
+status: ready
 depends_on: [TASK-032]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "a3c04331e93134f600c85f7b57f1d940c3ba650c"
 risk_level: high
 ---
 
@@ -19,16 +19,16 @@ Toda alteração recebe avaliação reproduzível de scope, diff, comandos e seg
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
-- TASK-007 aprovada com worktree real e ProcessRunner.
-- Baseline fixado no commit aprovado da TASK-007.
+- TASK-032 aprovada no PR `#10`, com skills, hooks e reviewers portáveis validados.
+- Baseline fixado no merge commit `a3c04331e93134f600c85f7b57f1d940c3ba650c` de `origin/dev`.
 - SPEC v1 fornece allowed scope e comandos como argv.
 
 ## Arquivos permitidos

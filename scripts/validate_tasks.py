@@ -5,6 +5,8 @@ from __future__ import annotations
 
 import ast
 import re
+import shutil
+import subprocess
 import sys
 from dataclasses import dataclass
 from pathlib import Path
@@ -307,6 +309,25 @@ def validate_links(errors: list[str]) -> None:
                 errors.append(f"{path}: link local inexistente: {raw_target}")
 
 
+def validate_planning_is_versioned(root: Path, errors: list[str]) -> None:
+    """Fail when repository ignore rules hide the normative planning tree."""
+    git = shutil.which("git")
+    if git is None:
+        errors.append("git ausente; não foi possível validar versionamento do planejamento")
+        return
+    result = subprocess.run(  # noqa: S603 - resolved executable and fixed read-only argv
+        [git, "check-ignore", "--no-index", "--quiet", "docs/planejamento/task-template.md"],
+        cwd=root,
+        capture_output=True,
+        timeout=5,
+        check=False,
+    )
+    if result.returncode == 0:
+        errors.append("docs/planejamento está ignorado; estado normativo deve ser versionado")
+    elif result.returncode != 1:
+        errors.append("falha ao validar regras de ignore para docs/planejamento")
+
+
 def main() -> int:
     errors: list[str] = []
     tasks = load_tasks(errors)
@@ -316,6 +337,7 @@ def main() -> int:
         validate_task(task, errors)
     validate_graph(tasks, errors)
     validate_links(errors)
+    validate_planning_is_versioned(ROOT, errors)
     if errors:
         for error in errors:
             print(f"ERROR: {error}", file=sys.stderr)

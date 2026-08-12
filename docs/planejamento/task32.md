@@ -2,7 +2,7 @@
 title: "TASK-032 — Automação agnóstica de agentes"
 task_id: TASK-032
 release: "V0.1"
-status: ready
+status: done
 depends_on: [TASK-007]
 baseline_commit: "6a0d60db0e4808a49feb1c366ab0db6bbb4eaff8"
 risk_level: critical
@@ -94,9 +94,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Claude e Codex carregam `AGENTS.md` e as mesmas skills canônicas sem duplicação do workflow.
-- [ ] **AC-002** — Payloads equivalentes dos dois hosts produzem a mesma decisão; escape, segredo e shell mutável falham fechados.
-- [ ] **AC-003** — Reviewers de segurança e arquitetura usam o mesmo checklist, herdam o modelo e não possuem autoridade de escrita.
+- [x] **AC-001** — Claude e Codex carregam `AGENTS.md` e as mesmas skills canônicas sem duplicação do workflow.
+- [x] **AC-002** — Payloads equivalentes dos dois hosts produzem a mesma decisão; escape, segredo e shell mutável falham fechados.
+- [x] **AC-003** — Reviewers de segurança e arquitetura usam o mesmo checklist, herdam o modelo e não possuem autoridade de escrita.
 
 ## Matriz de verificação
 

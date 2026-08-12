@@ -400,6 +400,8 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 
 Cada arquivo segue o [template normativo](task-template.md) e é validado por `python3 scripts/validate_tasks.py`. Pode existir no máximo uma task `ready`; zero é permitido enquanto a task concluída aguarda integração ou a próxima ainda não recebeu baseline. Uma task planejada recebe baseline SHA e é ativada apenas após todas as dependências terem evidência aprovada.
 
+O planejamento é estado versionado da Factory e nunca entra no `.gitignore`. Depois que um PR de implementação é integrado, uma branch de governança criada do `origin/dev` atualizado publica, no mesmo PR, a task concluída como `done` e a única sucessora como `ready`, cujo baseline é o merge commit aprovado. Nenhuma implementação da sucessora começa enquanto essa transição não estiver integrada em `dev`; isso evita status locais, baseline órfão e divergência entre modelos.
+
 | ID | Arquivo | Fatia de valor | Depende de |
 |---|---|---|---|
 | TASK-001 | [task1.md](task1.md) | Bootstrap reproduzível e `aif doctor` | — |
@@ -439,7 +441,7 @@ Cada arquivo segue o [template normativo](task-template.md) e é validado por `p
 
 ```mermaid
 flowchart LR
-    T1["1 Bootstrap"] --> T2["2 SPEC"] --> T3["3 Domain"] --> T4["4 SQLite"] --> T5["5 Artifacts"] --> T6["6 Process"] --> T7["7 Worktree"] --> T8["8 Gates"] --> T9["9 Fake E2E"]
+    T1["1 Bootstrap"] --> T2["2 SPEC"] --> T3["3 Domain"] --> T4["4 SQLite"] --> T5["5 Artifacts"] --> T6["6 Process"] --> T7["7 Worktree"] --> T32["32 Agent automation"] --> T8["8 Gates"] --> T9["9 Fake E2E"]
     T9 --> T10["10 Pool"] --> T11["11 Circuit"] --> T12["12 Continuation"] --> T13["13 OpenCode"] --> T14["14 V0.1"]
     T14 --> T15["15 Codex"] --> T16["16 Review"] --> T17["17 Repair"] --> T18["18 Approval / V0.2"]
     T18 --> T19["19 Context"]
