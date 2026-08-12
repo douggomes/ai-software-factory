@@ -101,6 +101,9 @@ Não marque critério como aprovado por inspeção subjetiva quando a task exige
 - Nunca faça merge, tag ou release automaticamente. A revisão/integração do PR e a promoção `dev → main` continuam humanas.
 - Não altere `status`, `baseline_commit`, dependências ou critérios da task durante sua execução.
 - Somente a Factory ou humano autorizado promove `planned → ready`, fixa baseline e, após validar evidências, ativa a próxima task.
+- `docs/planejamento/**` é estado normativo do produto e DEVE permanecer versionado; é proibido adicioná-lo ao `.gitignore`, removê-lo do índice ou manter transição de status apenas em commit local.
+- Após o merge de uma task, a Factory cria a partir do `origin/dev` atualizado uma branch `chore/task-lifecycle-TASK-NNN`, marca a task integrada como `done`, ativa no máximo uma sucessora e fixa seu `baseline_commit` no merge commit aprovado.
+- A transição de lifecycle é commitada, publicada e enviada em PR próprio para `dev` no mesmo ciclo. A sucessora só pode executar depois do merge desse PR e da confirmação de que `origin/dev` corresponde ao baseline fixado.
 - Aprovação refere-se ao base commit, diff hash, worktree e snapshots de gates exatos; qualquer mudança invalida a aprovação.
 
 ## 9. Relatório final obrigatório

@@ -20,6 +20,7 @@ from scripts.agent_automation.hook import (  # noqa: E402
     ToolInvocation,
     audit_changed_scope,
     evaluate_pre,
+    load_ready_policy,
     read_payload,
 )
 
@@ -129,13 +130,15 @@ def test_hook_payload_size_is_bounded() -> None:
 
 def test_real_claude_and_codex_payloads_are_equivalent_and_fail_closed() -> None:
     script = ROOT / "scripts/agent_automation/hook.py"
+    pattern = load_ready_policy(ROOT).allowed_patterns[0]
+    allowed_path = pattern.replace("/**", "/hook-probe.txt")
     cases = (
-        ("claude", {"tool_name": "Write", "tool_input": {"file_path": "AGENTS.md"}}, 0),
+        ("claude", {"tool_name": "Write", "tool_input": {"file_path": allowed_path}}, 0),
         (
             "codex",
             {
                 "tool_name": "apply_patch",
-                "tool_input": {"command": "*** Update File: AGENTS.md\n"},
+                "tool_input": {"command": f"*** Update File: {allowed_path}\n"},
             },
             0,
         ),
