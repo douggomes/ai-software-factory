@@ -10,8 +10,6 @@ from __future__ import annotations
 
 import argparse
 import asyncio
-import contextlib
-import fcntl
 import hashlib
 import json
 import os
@@ -23,19 +21,28 @@ import stat
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Generator, Mapping, Sequence
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping, Sequence
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
 from ai_software_factory import __version__
+from ai_software_factory.adapters.git.evaluation_workspace import GitEvaluationWorkspace
 from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
+from ai_software_factory.adapters.isolation.oci import (
+    DockerIsolationBackend,
+    OciIsolationPolicy,
+    OciIsolationRunner,
+    PodmanIsolationBackend,
+    SnapshotRootAuthorizer,
+)
 from ai_software_factory.adapters.persistence.artifact_store import (
     FilesystemArtifactStore,
     SqliteEventLogReader,
 )
 from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
 from ai_software_factory.application.queries import (
     RunEventsQuery,
     RunStatusQuery,
@@ -44,16 +51,20 @@ from ai_software_factory.application.queries import (
 )
 from ai_software_factory.application.spec_parser import SpecParseError, SpecParser
 from ai_software_factory.application.spec_validator import SpecValidator
-from ai_software_factory.config import ConfigError, Settings
+from ai_software_factory.config import ConfigError, IsolationSettings, Settings
+from ai_software_factory.core.evaluation_workspace import (
+    EvaluationCaptureRequest,
+    EvaluationSnapshot,
+)
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.models import TaskExecution
-from ai_software_factory.core.process_models import ProcessPolicy
+from ai_software_factory.core.process_models import ProcessPolicy, ProcessRequest, ProcessResult
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
     ValidationReport,
     canonical_json,
 )
-from ai_software_factory.core.workspace_models import Workspace, WorkspaceSnapshot
+from ai_software_factory.core.workspace_models import Workspace, WorkspaceRequest, WorkspaceSnapshot
 from ai_software_factory.evaluation.models import resolve_profile
 from ai_software_factory.evaluation.runner import Evaluator
 from ai_software_factory.ports.artifacts import (
@@ -62,9 +73,14 @@ from ai_software_factory.ports.artifacts import (
     ArtifactNotFoundError,
     ArtifactRef,
 )
+from ai_software_factory.ports.evaluation_workspace import EvaluationWorkspaceError
 from ai_software_factory.ports.persistence import RunNotFoundError
+from ai_software_factory.ports.processes import (
+    IsolationBackend,
+    ProcessIsolationError,
+    ProcessRunner,
+)
 from ai_software_factory.ports.validation import (
-    ChangedFileEvidence,
     GateContext,
     GateStatus,
     ValidationError,
@@ -79,6 +95,14 @@ PROVIDER_EXECUTABLES: Final[Mapping[str, str]] = {
     "codex": "codex",
     "opencode": "opencode",
 }
+_APPROVED_OCI_RUNTIMES: Final[Mapping[str, tuple[Path, ...]]] = {
+    "docker": (
+        Path("/Applications/Docker.app/Contents/Resources/bin/docker"),
+        Path("/opt/homebrew/bin/docker"),
+        Path("/usr/local/bin/docker"),
+    ),
+    "podman": (Path("/opt/homebrew/bin/podman"), Path("/usr/local/bin/podman")),
+}
 
 _VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
 _VERSION_FLAG: Final[str] = "--version"
@@ -90,7 +114,6 @@ _DEFAULT_FACTORY_HOME: Final[Path] = Path.home() / ".aifactory"
 _STATE_DB_NAME: Final[str] = "state.db"
 _WORKTREE_DIR_NAME: Final[str] = "worktrees"
 _LOCK_DIR_NAME: Final[str] = "locks"
-_LOCK_FILE_MODE: Final[int] = 0o600
 _GIT_HOOKS_CONFIG: Final[str] = "core.hooksPath=/dev/null"
 _GIT_INSPECT_TIMEOUT_SECONDS: Final[float] = 5.0
 _MAX_WORKSPACE_DISCOVERY_ENTRIES: Final[int] = 256
@@ -140,6 +163,13 @@ class DoctorProbes:
     sqlite_version: Callable[[], str]
     tool_probe: Callable[[str], ToolStatus]
     provider_probe: Callable[[str], str]
+    isolation_probe: Callable[[IsolationSettings], dict[str, str | None]] = field(
+        default=lambda settings: {
+            "status": "disabled" if settings.backend == "disabled" else "incompatible",
+            "backend": None if settings.backend == "disabled" else settings.backend,
+            "image": settings.image,
+        }
+    )
 
 
 def probe_tool(
@@ -177,17 +207,124 @@ def probe_provider(executable: str) -> str:
     return "available" if shutil.which(executable) is not None else "unavailable"
 
 
+def probe_isolation(settings: IsolationSettings) -> dict[str, str | None]:
+    if settings.backend == "disabled":
+        return {"status": "disabled", "backend": None, "image": None}
+    return {
+        "status": "available" if _find_approved_oci_runtime(settings.backend) else "incompatible",
+        "backend": settings.backend,
+        "image": settings.image,
+    }
+
+
+def build_isolation_backend(
+    settings: IsolationSettings,
+    runtime_lookup: Callable[[str], str | None] | None = None,
+) -> IsolationBackend | None:
+    if settings.backend == "disabled":
+        return None
+    runtime = (runtime_lookup or _find_approved_oci_runtime)(settings.backend)
+    if runtime is None or settings.image is None:
+        raise ConfigError("runtime OCI configurado não está disponível")
+    policy = OciIsolationPolicy(
+        settings.backend, settings.image, Path(runtime).resolve(strict=True)
+    )
+    registry: Mapping[str, type[IsolationBackend]] = {
+        "docker": DockerIsolationBackend,
+        "podman": PodmanIsolationBackend,
+    }
+    return registry[settings.backend](policy)
+
+
+def build_validation_process_runner(
+    settings: IsolationSettings,
+    snapshot: EvaluationSnapshot,
+    host_runner: ProcessRunner,
+) -> ProcessRunner:
+    backend = build_isolation_backend(settings)
+    return (
+        host_runner
+        if backend is None
+        else OciIsolationRunner(host_runner, backend, SnapshotRootAuthorizer(snapshot))
+    )
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidationIsolationEvidence:
+    """Non-secret OCI policy proof bound to one validation snapshot."""
+
+    backend: str
+    policy_hash: str
+
+
+class _AuthorizedValidationOciRunner(ProcessRunner):
+    """Restrict the OCI adapter to the closed registered validation argv set."""
+
+    def __init__(
+        self,
+        delegate: ProcessRunner,
+        snapshot: EvaluationSnapshot,
+        allowed_argv: frozenset[tuple[str, ...]],
+        expected_policy: ProcessPolicy,
+    ) -> None:
+        self._delegate = delegate
+        self._snapshot = snapshot
+        self._allowed_argv = allowed_argv
+        self._expected_policy = expected_policy
+
+    async def run(self, request: ProcessRequest) -> ProcessResult:
+        if (
+            request.trust_profile.value != "untrusted"
+            or request.cwd != self._snapshot.root
+            or request.argv not in self._allowed_argv
+            or request.argv[0] != "uv"
+            or request.environment
+            or request.policy != self._expected_policy
+        ):
+            raise ProcessIsolationError("validation command is outside the authorized OCI profile")
+        return await self._delegate.run(request)
+
+
+def _validation_isolation_evidence(
+    settings: IsolationSettings,
+) -> _ValidationIsolationEvidence | None:
+    if settings.backend == "disabled":
+        return None
+    if settings.image is None:
+        raise ConfigError("isolamento OCI configurado não contém imagem aprovada")
+    runtime = _find_approved_oci_runtime(settings.backend)
+    if runtime is None:
+        raise ConfigError("runtime OCI configurado não está disponível")
+    policy = OciIsolationPolicy(settings.backend, settings.image, Path(runtime))
+    return _ValidationIsolationEvidence(settings.backend, policy.policy_hash)
+
+
+def _find_approved_oci_runtime(backend: str) -> str | None:
+    for candidate in _APPROVED_OCI_RUNTIMES.get(backend, ()):
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved == candidate and resolved.is_file() and os.access(resolved, os.X_OK):
+            return str(resolved)
+    return None
+
+
 def default_probes() -> DoctorProbes:
     return DoctorProbes(
         python_version=lambda: sys.version.split()[0],
         sqlite_version=lambda: sqlite3.sqlite_version,
         tool_probe=probe_tool,
         provider_probe=probe_provider,
+        isolation_probe=probe_isolation,
     )
 
 
-def build_doctor_report(probes: DoctorProbes) -> dict[str, object]:
+def build_doctor_report(
+    probes: DoctorProbes, settings: IsolationSettings | None = None
+) -> dict[str, object]:
     """Assemble the deterministic diagnostic report from injected probes."""
+    isolation = settings if settings is not None else IsolationSettings()
     uv_status = probes.tool_probe("uv")
     git_status = probes.tool_probe("git")
     return {
@@ -199,6 +336,7 @@ def build_doctor_report(probes: DoctorProbes) -> dict[str, object]:
             name: probes.provider_probe(executable)
             for name, executable in sorted(PROVIDER_EXECUTABLES.items())
         },
+        "isolation": probes.isolation_probe(isolation),
     }
 
 
@@ -377,7 +515,9 @@ def _run_workspace_inspect_command(run_id_raw: str, *, factory_home: Path) -> in
             return _EXIT_NOT_FOUND
         artifact_store = FilesystemArtifactStore(factory_home)
         manager = GitWorktreeManager(
-            AsyncioProcessRunner(artifact_store), artifact_store, git_executable
+            AsyncioProcessRunner(artifact_store, sanitizer_factory=StreamingOutputSanitizer),
+            artifact_store,
+            git_executable,
         )
         snapshots = asyncio.run(
             _inspect_workspace_candidates(manager, factory_home, git_executable, run_id, candidates)
@@ -512,233 +652,6 @@ def _load_task_validation_config(
     raise ValidationTaskSelectionError(f"SPEC does not define task {task_id.value}")
 
 
-def _capture_diff(
-    git_executable: Path, worktree_path: Path, base_commit: str
-) -> tuple[tuple[str, ...], tuple[ChangedFileEvidence, ...], str, str]:
-    name_only = _git_diff_output(
-        git_executable,
-        worktree_path,
-        (
-            "diff",
-            "--no-ext-diff",
-            "--no-textconv",
-            "--name-only",
-            "-z",
-            base_commit,
-            "--",
-        ),
-    )
-    untracked = _git_output(
-        git_executable,
-        worktree_path,
-        ("ls-files", "--others", "--exclude-standard", "-z", "--"),
-        label="untracked paths",
-    )
-    ignored = _git_output(
-        git_executable,
-        worktree_path,
-        (
-            "ls-files",
-            "--others",
-            "--ignored",
-            "--exclude-standard",
-            "-z",
-            "--",
-            *_CREDENTIAL_PATHSPECS,
-        ),
-        label="ignored paths",
-    )
-    tracked_paths = tuple(path for path in name_only.split("\x00") if path)
-    untracked_paths = tuple(path for path in untracked.split("\x00") if path)
-    ignored_credential_paths = tuple(
-        path for path in ignored.split("\x00") if path and _is_credential_path(path)
-    )
-    changed_files = tuple(
-        dict.fromkeys((*tracked_paths, *untracked_paths, *ignored_credential_paths))
-    )
-    if len(changed_files) > _MAX_VALIDATION_FILES:
-        raise WorkspaceError("validation changed-file limit exceeded")
-    evidence = _capture_changed_files(worktree_path, changed_files)
-    diff_text = _git_diff_output(
-        git_executable,
-        worktree_path,
-        ("diff", "--no-ext-diff", "--no-textconv", "--binary", base_commit, "--"),
-    )
-    untracked_manifest = "".join(
-        f"untracked {item.path} {item.content_hash}\n"
-        for item in evidence
-        if item.path in untracked_paths or item.path in ignored_credential_paths
-    )
-    diff_text = f"{diff_text}{untracked_manifest}"
-    diff_check_output = _git_diff_output(
-        git_executable,
-        worktree_path,
-        ("diff", "--no-ext-diff", "--no-textconv", "--check", base_commit, "--"),
-        diff_check=True,
-    )
-    untracked_check = _untracked_diff_check(evidence, frozenset(untracked_paths))
-    diff_check_output = "\n".join(part for part in (diff_check_output, untracked_check) if part)
-    return changed_files, evidence, diff_text, diff_check_output
-
-
-def _capture_changed_files(
-    worktree_path: Path, changed_files: tuple[str, ...]
-) -> tuple[ChangedFileEvidence, ...]:
-    evidence: list[ChangedFileEvidence] = []
-    total_bytes = 0
-    for path in changed_files:
-        item = _capture_changed_file(worktree_path, path)
-        total_bytes += len(item.content)
-        if total_bytes > _MAX_VALIDATION_TOTAL_BYTES:
-            raise WorkspaceError("validation total changed-content limit exceeded")
-        evidence.append(item)
-    return tuple(evidence)
-
-
-def _is_credential_path(path: str) -> bool:
-    name = Path(path).name
-    return (
-        name == ".env"
-        or name.startswith(".env.")
-        or name
-        in {
-            "auth.json",
-            "id_rsa",
-            "id_ed25519",
-        }
-    )
-
-
-def _untracked_diff_check(
-    evidence: tuple[ChangedFileEvidence, ...], untracked_paths: frozenset[str]
-) -> str:
-    findings: list[str] = []
-    for item in evidence:
-        if item.path not in untracked_paths or item.scan_error is not None:
-            continue
-        if any(line.endswith((b" ", b"\t")) for line in item.content.splitlines()):
-            findings.append(f"{item.path}: trailing whitespace")
-        if any(
-            line.startswith((b"<<<<<<<", b"=======", b">>>>>>>"))
-            for line in item.content.splitlines()
-        ):
-            findings.append(f"{item.path}: conflict marker")
-    return "\n".join(findings)
-
-
-def _capture_changed_file(worktree_path: Path, relative_path: str) -> ChangedFileEvidence:
-    if _is_credential_path(relative_path):
-        return ChangedFileEvidence(
-            path=relative_path,
-            content=b"",
-            content_hash=hashlib.sha256(relative_path.encode("utf-8")).hexdigest(),
-            scan_error="credential-shaped path is never read",
-        )
-    candidate = Path(relative_path)
-    if candidate.is_absolute() or ".." in candidate.parts:
-        return ChangedFileEvidence(
-            path=relative_path,
-            content=b"",
-            content_hash=_EMPTY_SHA256,
-            scan_error="unsafe path",
-        )
-    try:
-        fd = _open_changed_file(worktree_path, candidate)
-        file_stat = os.fstat(fd)
-        if not stat.S_ISREG(file_stat.st_mode):
-            raise WorkspaceError("changed path is not a regular file")
-        if file_stat.st_size > _MAX_VALIDATION_FILE_BYTES:
-            raise WorkspaceError("changed file exceeds validation scan limit")
-        try:
-            data = _read_changed_file(fd)
-        finally:
-            os.close(fd)
-    except FileNotFoundError:
-        return ChangedFileEvidence(
-            path=relative_path,
-            content=b"",
-            content_hash=_EMPTY_SHA256,
-            deleted=True,
-        )
-    except (OSError, WorkspaceError) as error:
-        return ChangedFileEvidence(
-            path=relative_path,
-            content=b"",
-            content_hash=_EMPTY_SHA256,
-            scan_error=str(error),
-        )
-    return ChangedFileEvidence(
-        path=relative_path,
-        content=data,
-        content_hash=hashlib.sha256(data).hexdigest(),
-    )
-
-
-def _open_changed_file(worktree_path: Path, relative_path: Path) -> int:
-    current_fd = _open_directory_path(worktree_path)
-    try:
-        for part in relative_path.parts[:-1]:
-            next_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
-            os.close(current_fd)
-            current_fd = next_fd
-        return os.open(
-            relative_path.parts[-1],
-            os.O_RDONLY | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=current_fd,
-        )
-    finally:
-        os.close(current_fd)
-
-
-def _directory_open_flags() -> int:
-    return os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
-
-
-def _open_directory_path(path: Path) -> int:
-    if not path.is_absolute():
-        raise WorkspaceError("directory path must be absolute")
-    current_fd = os.open(path.anchor, _directory_open_flags())
-    try:
-        for part in path.parts[1:]:
-            next_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
-            os.close(current_fd)
-            current_fd = next_fd
-        return current_fd
-    except BaseException:
-        os.close(current_fd)
-        raise
-
-
-def _open_relative_file(root: Path, relative_path: Path, flags: int) -> int:
-    if relative_path.is_absolute() or ".." in relative_path.parts:
-        raise WorkspaceError("relative file path is unsafe")
-    current_fd = _open_directory_path(root)
-    try:
-        for part in relative_path.parts[:-1]:
-            next_fd = os.open(part, _directory_open_flags(), dir_fd=current_fd)
-            os.close(current_fd)
-            current_fd = next_fd
-        return os.open(
-            relative_path.parts[-1],
-            flags | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=current_fd,
-        )
-    finally:
-        os.close(current_fd)
-
-
-def _read_changed_file(fd: int) -> bytes:
-    output = bytearray()
-    while True:
-        remaining = _MAX_VALIDATION_FILE_BYTES + 1 - len(output)
-        chunk = os.read(fd, min(_GIT_READ_CHUNK_BYTES, remaining))
-        if not chunk:
-            return bytes(output)
-        output.extend(chunk)
-        if len(output) > _MAX_VALIDATION_FILE_BYTES:
-            raise WorkspaceError("changed file exceeds validation scan limit")
-
-
 @dataclass(frozen=True, slots=True)
 class _ValidateEnvironment:
     """Resolved, host-specific inputs the composition root supplies to validate."""
@@ -747,6 +660,7 @@ class _ValidateEnvironment:
     factory_home: Path
     git_executable: Path
     uv_executable: Path
+    isolation: IsolationSettings
 
 
 async def _run_validate_async(
@@ -764,32 +678,65 @@ async def _run_validate_async(
             task_execution,
             environment.git_executable,
         )
-        process_runner = AsyncioProcessRunner(artifact_store)
-        process_policy = ProcessPolicy(
-            allowed_executables=(environment.uv_executable,),
-            allowed_cwd_roots=(worktree_path,),
+        host_runner = AsyncioProcessRunner(
+            artifact_store, sanitizer_factory=StreamingOutputSanitizer
         )
 
-        def capture_context() -> GateContext:
-            changed_files, evidence, diff_text, diff_check_output = _capture_diff(
-                environment.git_executable, worktree_path, task_execution.base_commit
+        repository = _validation_repository(environment.git_executable, worktree_path)
+        workspace_manager = GitWorktreeManager(
+            host_runner, artifact_store, environment.git_executable
+        )
+        try:
+            workspace = await workspace_manager.prepare(
+                WorkspaceRequest(
+                    repository=repository,
+                    factory_home=environment.factory_home,
+                    run_id=run_id,
+                    task_id=task_execution.task_id,
+                    base_commit=task_execution.base_commit,
+                )
             )
-            return GateContext(
-                run_id=run_id,
-                task_id=task_execution.task_id,
-                worktree_path=worktree_path,
-                base_commit=task_execution.base_commit,
-                allowed_paths=task_config.allowed_paths,
-                changed_files=changed_files,
-                changed_file_evidence=evidence,
-                diff_text=diff_text,
-                diff_check_output=diff_check_output,
+            if workspace.worktree_path != worktree_path:
+                raise WorkspaceError("validation workspace identity does not match persisted path")
+            evaluation_workspace = GitEvaluationWorkspace(
+                host_runner,
+                artifact_store,
+                environment.git_executable,
+                workspace_manager,
             )
+            evaluation_snapshot = await evaluation_workspace.capture(
+                EvaluationCaptureRequest(workspace)
+            )
+            context = _context_from_evaluation_snapshot(
+                evaluation_snapshot,
+                task_config.allowed_paths,
+            )
+            process_policy = ProcessPolicy(
+                allowed_executables=(environment.uv_executable,),
+                allowed_cwd_roots=(evaluation_snapshot.root,),
+            )
+            isolation_evidence = _validation_isolation_evidence(environment.isolation)
+            allowed_argv = frozenset(
+                ("uv", "run", "--offline", *command[2:])
+                for command in task_config.validation_commands
+            )
+            process_runner = _AuthorizedValidationOciRunner(
+                build_validation_process_runner(
+                    environment.isolation, evaluation_snapshot, host_runner
+                ),
+                evaluation_snapshot,
+                allowed_argv,
+                process_policy,
+            )
+            context = _with_isolation_evidence(context, isolation_evidence)
 
-        with _validation_lock(
-            environment.factory_home, worktree_path, run_id, task_execution.task_id
-        ):
-            context = capture_context()
+            async def source_is_current() -> bool:
+                try:
+                    await evaluation_workspace.verify_source_current(evaluation_snapshot)
+                except EvaluationWorkspaceError:
+                    return False
+                return True
+
             profile = resolve_profile(
                 profile_name,
                 uv_executable=environment.uv_executable,
@@ -797,10 +744,84 @@ async def _run_validate_async(
                 process_policy=process_policy,
                 validation_commands=task_config.validation_commands,
             )
-            evaluator = Evaluator(context, artifact_store, context_refresh=capture_context)
+
+            evaluator = Evaluator(
+                context,
+                artifact_store,
+                source_verifier=source_is_current,
+            )
             return await evaluator.run(profile)
+        finally:
+            workspace_manager.close()
     finally:
         await store.close()
+
+
+def _validation_repository(git_executable: Path, worktree_path: Path) -> Path:
+    """Resolve the canonical primary repository for one managed worktree."""
+    common_directory = Path(
+        _git_output(
+            git_executable,
+            worktree_path,
+            ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+            label="validation Git common directory",
+        )
+    )
+    repository = _canonical_cli_directory(common_directory.parent, "validation repository")
+    top_level = _git_output(
+        git_executable,
+        repository,
+        ("rev-parse", "--show-toplevel"),
+        label="validation repository root",
+    )
+    if _canonical_cli_directory(Path(top_level), "validation repository root") != repository:
+        raise WorkspaceError("validation repository is not the managed primary worktree")
+    return repository
+
+
+def _context_from_evaluation_snapshot(
+    snapshot: EvaluationSnapshot,
+    allowed_paths: tuple[str, ...],
+) -> GateContext:
+    """Translate one verified adapter result into immutable gate facts."""
+    return GateContext(
+        run_id=snapshot.workspace.run_id,
+        task_id=snapshot.workspace.task_id,
+        worktree_path=snapshot.root,
+        base_commit=snapshot.workspace.base_commit,
+        allowed_paths=allowed_paths,
+        changed_files=snapshot.evidence.changed_paths,
+        changed_file_evidence=(),
+        diff_text="",
+        diff_check_output="",
+        evaluation_snapshot_id=snapshot.snapshot_id,
+        evaluation_manifest_hash=snapshot.manifest_hash,
+        evaluation_identity_hash=snapshot.identity_hash,
+        repository_evidence=snapshot.evidence,
+    )
+
+
+def _with_isolation_evidence(
+    context: GateContext, evidence: _ValidationIsolationEvidence | None
+) -> GateContext:
+    """Attach the configured OCI policy proof without exposing capability tokens."""
+    return GateContext(
+        run_id=context.run_id,
+        task_id=context.task_id,
+        worktree_path=context.worktree_path,
+        base_commit=context.base_commit,
+        allowed_paths=context.allowed_paths,
+        changed_files=context.changed_files,
+        changed_file_evidence=context.changed_file_evidence,
+        diff_text=context.diff_text,
+        diff_check_output=context.diff_check_output,
+        evaluation_snapshot_id=context.evaluation_snapshot_id,
+        evaluation_manifest_hash=context.evaluation_manifest_hash,
+        evaluation_identity_hash=context.evaluation_identity_hash,
+        isolation_backend=None if evidence is None else evidence.backend,
+        isolation_policy_hash=None if evidence is None else evidence.policy_hash,
+        repository_evidence=context.repository_evidence,
+    )
 
 
 def _validated_worktree_path(
@@ -849,51 +870,6 @@ def _validated_worktree_path(
     return worktree_path
 
 
-@contextlib.contextmanager
-def _validation_lock(
-    factory_home: Path,
-    worktree_path: Path,
-    run_id: RunId,
-    task_id: TaskId,
-) -> Generator[None]:
-    canonical_home = _canonical_cli_directory(factory_home, "factory home")
-    relative = worktree_path.relative_to(canonical_home / _WORKTREE_DIR_NAME)
-    lock_path = (
-        canonical_home / _LOCK_DIR_NAME / relative.parts[0] / run_id.value / f"{task_id.value}.lock"
-    )
-    _canonical_cli_directory(lock_path.parent, "validation lock directory")
-    try:
-        fd = _open_relative_file(
-            canonical_home,
-            lock_path.relative_to(canonical_home),
-            os.O_RDWR,
-        )
-    except OSError as error:
-        raise WorkspaceError("validation lock is unavailable") from error
-    try:
-        lock_stat = os.fstat(fd)
-        if (
-            not stat.S_ISREG(lock_stat.st_mode)
-            or lock_stat.st_uid != os.getuid()
-            or stat.S_IMODE(lock_stat.st_mode) != _LOCK_FILE_MODE
-            or lock_stat.st_nlink != 1
-        ):
-            raise WorkspaceError("validation lock identity is unsafe")
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError as error:
-            raise WorkspaceError("validation worktree still has an active writer") from error
-        os.lseek(fd, 0, os.SEEK_SET)
-        identity = os.read(fd, 256).decode("ascii", errors="strict")
-        if identity != f"{run_id.value}\n{task_id.value}\n":
-            raise WorkspaceError("validation lock identity does not match run/task")
-        yield
-    finally:
-        with contextlib.suppress(OSError):
-            fcntl.flock(fd, fcntl.LOCK_UN)
-        os.close(fd)
-
-
 def _snapshot_summary(snapshot: ValidationSnapshot) -> dict[str, object]:
     return {
         "snapshot_id": snapshot.snapshot_id.value,
@@ -906,7 +882,13 @@ def _snapshot_summary(snapshot: ValidationSnapshot) -> dict[str, object]:
     }
 
 
-def _run_validate_command(run_id_raw: str, profile_name: str, *, factory_home: Path) -> int:
+def _run_validate_command(
+    run_id_raw: str,
+    profile_name: str,
+    *,
+    factory_home: Path,
+    settings: Settings,
+) -> int:
     try:
         run_id = _parse_run_id(run_id_raw)
         db_path = resolve_state_db(factory_home)
@@ -918,12 +900,20 @@ def _run_validate_command(run_id_raw: str, profile_name: str, *, factory_home: P
             factory_home=factory_home,
             git_executable=_resolve_git_executable(),
             uv_executable=_resolve_uv_executable(),
+            isolation=settings.isolation,
         )
         snapshot = asyncio.run(_run_validate_async(run_id, profile_name, environment))
     except RunNotFoundError as error:
         print(f"error: {error}", file=sys.stderr)
         return _EXIT_NOT_FOUND
-    except (ArtifactError, ValidationError, ValueError, WorkspaceError, OSError) as error:
+    except (
+        ArtifactError,
+        EvaluationWorkspaceError,
+        ValidationError,
+        ValueError,
+        WorkspaceError,
+        OSError,
+    ) as error:
         print(f"error: {error}", file=sys.stderr)
         return _EXIT_INVALID
     print(json.dumps(_snapshot_summary(snapshot), indent=2, sort_keys=True))
@@ -1072,29 +1062,6 @@ def _read_only_git(executable: Path, cwd: Path, args: tuple[str, ...]) -> str:
     return value
 
 
-def _git_diff_output(
-    executable: Path,
-    cwd: Path,
-    args: tuple[str, ...],
-    *,
-    diff_check: bool = False,
-) -> str:
-    """Read-only ``git diff`` variant that tolerates empty or non-zero output.
-
-    ``git diff --check`` legitimately exits non-zero when it reports a
-    whitespace or conflict-marker error, and an empty diff is a valid (if
-    suspicious) outcome the caller decides how to treat — unlike
-    ``_read_only_git``, which is reserved for identity probes that must
-    always succeed with non-empty output.
-    """
-    completed = _run_controlled_git(executable, cwd, args)
-    if diff_check and completed.returncode == 1:
-        return completed.stdout or "git diff --check reported a violation"
-    if completed.returncode != 0:
-        raise WorkspaceError(f"Git inspection failed: {args[0]}")
-    return completed.stdout
-
-
 def _git_output(
     executable: Path,
     cwd: Path,
@@ -1156,10 +1123,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _dispatch(args: argparse.Namespace, factory_home: Path) -> int | None:
+def _dispatch(args: argparse.Namespace, factory_home: Path, settings: Settings) -> int | None:
     result: int | None = None
     if args.command == "doctor":
-        report = build_doctor_report(default_probes())
+        report = build_doctor_report(default_probes(), settings.isolation)
         print(json.dumps(report, indent=2, sort_keys=True))
         result = 0
     elif args.command == "spec":
@@ -1173,7 +1140,12 @@ def _dispatch(args: argparse.Namespace, factory_home: Path) -> int | None:
         if args.workspace_command == "inspect":
             result = _run_workspace_inspect_command(args.run_id, factory_home=factory_home)
     elif args.command == "validate":
-        result = _run_validate_command(args.run_id, args.profile, factory_home=factory_home)
+        result = _run_validate_command(
+            args.run_id,
+            args.profile,
+            factory_home=factory_home,
+            settings=settings,
+        )
     return result
 
 
@@ -1181,12 +1153,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        Settings.load(None)
+        settings = Settings.load(None)
     except ConfigError as error:
         print(f"error: {error}", file=sys.stderr)
         return _EXIT_INVALID
     factory_home = resolve_factory_home()
-    result = _dispatch(args, factory_home)
+    result = _dispatch(args, factory_home, settings)
     if result is not None:
         return result
     if args.command == "spec":

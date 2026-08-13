@@ -12,6 +12,7 @@ import shutil
 import stat
 import subprocess
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from pathlib import Path
@@ -24,6 +25,9 @@ from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
 from ai_software_factory.adapters.persistence.artifact_store import FilesystemArtifactStore
 from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
+from ai_software_factory.config import APPROVED_VALIDATION_IMAGE, IsolationSettings, Settings
+from ai_software_factory.core.evaluation_workspace import detect_secrets
 from ai_software_factory.core.events import DomainEvent, EventType
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.models import Run, RunStatus, TaskExecution, TaskStage
@@ -91,6 +95,48 @@ class _RecordingProcessRunner:
         return await self._delegate.run(request)
 
 
+@dataclass(frozen=True, slots=True)
+class _FakeIsolationCapability:
+    """Opaque test-only proof returned by the isolated runner boundary."""
+
+    value: str = "capability"
+
+
+@dataclass(slots=True)
+class _RecordingIsolationBackend:
+    """Exercise CLI composition without starting a real OCI runtime in tests."""
+
+    runtime: Path
+    requests: list[ProcessRequest]
+    on_request: Callable[[], None] | None = None
+
+    async def probe(self) -> _FakeIsolationCapability:
+        return _FakeIsolationCapability()
+
+    def authorize(self, capability: _FakeIsolationCapability) -> _FakeIsolationCapability:
+        return capability
+
+    def build_run_argv(
+        self,
+        capability: _FakeIsolationCapability,
+        snapshot_root: Path,
+        container_name: str,
+        request: ProcessRequest,
+    ) -> tuple[str, ...]:
+        del capability, snapshot_root, container_name
+        self.requests.append(request)
+        if self.on_request is not None:
+            self.on_request()
+            self.on_request = None
+        return (str(self.runtime), "run", *request.argv)
+
+    def build_cleanup_argv(
+        self, capability: _FakeIsolationCapability, container_name: str
+    ) -> tuple[str, ...]:
+        del capability, container_name
+        return (str(self.runtime), "cleanup")
+
+
 def _assert_requests_are_authorized(
     requests: list[ProcessRequest],
     expected_argv: list[tuple[str, ...]],
@@ -103,6 +149,62 @@ def _assert_requests_are_authorized(
     assert all(request.max_output_bytes > 0 for request in requests)
     assert all(request.max_processes is not None for request in requests)
     assert all(request.max_cpu_seconds is not None for request in requests)
+
+
+def _assert_isolated_profile_evidence(
+    payload: dict[str, object],
+    artifact_store: FilesystemArtifactStore,
+    run_id: RunId,
+    factory_home: Path,
+    requests: list[ProcessRequest],
+) -> None:
+    gates = cast(list[dict[str, str]], payload["gates"])
+    assert [gate["name"] for gate in gates] == [
+        "scope",
+        "diff",
+        "secrets",
+        "compile",
+        "lint",
+        "types",
+        "tests",
+    ]
+    assert all(gate["status"] == "PASSED" for gate in gates)
+    assert len(requests) == len(_REGISTERED_TEST_COMMANDS)
+    snapshot_roots = {request.cwd for request in requests}
+    assert len(snapshot_roots) == 1
+    snapshot_root = snapshot_roots.pop()
+    assert snapshot_root.is_relative_to(factory_home / "evaluations")
+    assert all(request.trust_profile is TrustProfile.UNTRUSTED for request in requests)
+    assert all(not request.environment and request.argv[0] == "uv" for request in requests)
+    persisted = json.loads(
+        artifact_store.read(
+            ArtifactRef(
+                run_id=run_id,
+                relative_path=f"validations/{payload['snapshot_id']}.json",
+                kind=ArtifactKind.VALIDATION,
+            )
+        )
+    )
+    evaluation_evidence = cast(dict[str, str], persisted["evaluation_snapshot"])
+    isolation_evidence = cast(dict[str, str], persisted["isolation"])
+    assert evaluation_evidence["snapshot_id"] == snapshot_root.parent.name
+    manifest = json.loads(
+        artifact_store.read(
+            ArtifactRef(
+                run_id=run_id,
+                relative_path=f"evaluations/{evaluation_evidence['snapshot_id']}/manifest.json",
+                kind=ArtifactKind.VALIDATION,
+            )
+        )
+    )
+    assert persisted["diff_hash"] == manifest["diff_hash"]
+    assert isolation_evidence["backend"] == "docker"
+    for value in (
+        evaluation_evidence["manifest_hash"],
+        evaluation_evidence["identity_hash"],
+        isolation_evidence["policy_hash"],
+    ):
+        assert len(value) == len(hashlib.sha256().hexdigest())
 
 
 @pytest.fixture
@@ -146,7 +248,7 @@ async def _prepare_workspace(
     context: _RepoContext, base: str, run_id: RunId, task_id: TaskId
 ) -> tuple[GitWorktreeManager, Path]:
     manager = GitWorktreeManager(
-        AsyncioProcessRunner(context.artifact_store),
+        AsyncioProcessRunner(context.artifact_store, sanitizer_factory=StreamingOutputSanitizer),
         context.artifact_store,
         context.git_executable,
     )
@@ -251,7 +353,10 @@ async def _run_validate_cli(
     capsys: pytest.CaptureFixture[str], run_id: RunId, profile: str
 ) -> tuple[int, dict[str, object]]:
     exit_code = await asyncio.to_thread(cli.main, ["validate", run_id.value, "--profile", profile])
-    payload = cast(dict[str, object], json.loads(capsys.readouterr().out))
+    captured = capsys.readouterr()
+    if not captured.out:
+        pytest.fail(f"validate did not emit a snapshot: {captured.err}")
+    payload = cast(dict[str, object], json.loads(captured.out))
     return exit_code, payload
 
 
@@ -294,6 +399,142 @@ async def test_scope_secret_and_diff_fail_closed(
     )
 
 
+async def test_registered_profile_runs_all_gates_with_strong_isolation(
+    tmp_path: Path,
+    git_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """The registered profile binds every untrusted command to one OCI snapshot."""
+    repo, base = _init_repository(tmp_path, git_executable)
+    factory_home = tmp_path / "factory-home"
+    artifact_store = FilesystemArtifactStore(factory_home)
+    run_id = RunId("run-a1b2c3d4e5f6")
+    task_id = TaskId("TASK-999")
+    context = _RepoContext(repo, factory_home, git_executable, artifact_store)
+    manager, worktree_path = await _prepare_workspace(context, base, run_id, task_id)
+    (worktree_path / "src" / "new_module.py").write_text("value = 2\n", encoding="utf-8")
+    _persist_spec(artifact_store, run_id, task_id, allowed_paths=("src/**",))
+    await _persist_run(factory_home / "state.db", run_id, task_id, base, str(worktree_path))
+    manager.close()
+
+    runtime = _fake_command(tmp_path, "oci-runtime.py", exit_code=0)
+    backend = _RecordingIsolationBackend(runtime=runtime, requests=[])
+    settings = Settings(
+        isolation=IsolationSettings(backend="docker", image=APPROVED_VALIDATION_IMAGE)
+    )
+
+    def load_settings(_: Path | None) -> Settings:
+        return settings
+
+    def build_backend(isolation: IsolationSettings) -> _RecordingIsolationBackend | None:
+        return backend if isolation.backend == "docker" else None
+
+    def find_runtime(_: str) -> str:
+        return str(runtime)
+
+    monkeypatch.setenv("AIF_FACTORY_HOME", str(factory_home))
+    monkeypatch.setattr(cli.Settings, "load", staticmethod(load_settings))
+    monkeypatch.setattr(cli, "build_isolation_backend", build_backend)
+    monkeypatch.setattr(cli, "_find_approved_oci_runtime", find_runtime)
+
+    exit_code, payload = await _run_validate_cli(capsys, run_id, "tests")
+
+    assert exit_code == 0
+    _assert_isolated_profile_evidence(
+        payload,
+        artifact_store,
+        run_id,
+        factory_home,
+        backend.requests,
+    )
+
+    disabled_settings = Settings()
+
+    def load_disabled_settings(_: Path | None) -> Settings:
+        return disabled_settings
+
+    monkeypatch.setattr(cli.Settings, "load", staticmethod(load_disabled_settings))
+    blocked_exit, blocked_payload = await _run_validate_cli(capsys, run_id, "tests")
+    assert blocked_exit != 0
+    assert _gate_statuses(blocked_payload) == {
+        "scope": "PASSED",
+        "diff": "PASSED",
+        "secrets": "PASSED",
+        "compile": "FAILED",
+        "lint": "FAILED",
+        "types": "FAILED",
+        "tests": "FAILED",
+    }
+    assert len(backend.requests) == len(_REGISTERED_TEST_COMMANDS)
+
+
+async def test_registered_profile_invalidates_when_source_changes_during_gates(
+    tmp_path: Path,
+    git_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """A source mutation after capture invalidates the persisted validation snapshot."""
+    repo, base = _init_repository(tmp_path, git_executable)
+    factory_home = tmp_path / "factory-home"
+    artifact_store = FilesystemArtifactStore(factory_home)
+    run_id = RunId("run-8a1b2c3d4e5f")
+    task_id = TaskId("TASK-999")
+    context = _RepoContext(repo, factory_home, git_executable, artifact_store)
+    manager, worktree_path = await _prepare_workspace(context, base, run_id, task_id)
+    changed = worktree_path / "src" / "new_module.py"
+    changed.write_text("value = 2\n", encoding="utf-8")
+    _persist_spec(artifact_store, run_id, task_id, allowed_paths=("src/**",))
+    await _persist_run(factory_home / "state.db", run_id, task_id, base, str(worktree_path))
+    manager.close()
+
+    runtime = _fake_command(tmp_path, "oci-runtime.py", exit_code=0)
+    backend = _RecordingIsolationBackend(runtime=runtime, requests=[])
+
+    def mutate_source() -> None:
+        changed.write_text("value = 3\n", encoding="utf-8")
+
+    backend.on_request = mutate_source
+    settings = Settings(
+        isolation=IsolationSettings(backend="docker", image=APPROVED_VALIDATION_IMAGE)
+    )
+    monkeypatch.setenv("AIF_FACTORY_HOME", str(factory_home))
+
+    def load_settings(_: Path | None) -> Settings:
+        return settings
+
+    def build_backend(_: IsolationSettings) -> _RecordingIsolationBackend:
+        return backend
+
+    def find_runtime(_: str) -> str:
+        return str(runtime)
+
+    monkeypatch.setattr(cli.Settings, "load", staticmethod(load_settings))
+    monkeypatch.setattr(cli, "build_isolation_backend", build_backend)
+    monkeypatch.setattr(cli, "_find_approved_oci_runtime", find_runtime)
+
+    exit_code, payload = await _run_validate_cli(capsys, run_id, "tests")
+
+    assert exit_code != 0
+    assert payload["status"] == "FAILED"
+    diff_gate = next(
+        gate for gate in cast(list[dict[str, str]], payload["gates"]) if gate["name"] == "diff"
+    )
+    assert diff_gate["status"] == "FAILED"
+    persisted = json.loads(
+        artifact_store.read(
+            ArtifactRef(
+                run_id=run_id,
+                relative_path=f"validations/{payload['snapshot_id']}.json",
+                kind=ArtifactKind.VALIDATION,
+            )
+        )
+    )
+    findings = [finding for gate in persisted["gate_results"] for finding in gate["findings"]]
+    assert any(finding["code"] == "WORKTREE_CHANGED_DURING_VALIDATION" for finding in findings)
+
+
 async def test_profile_uses_safe_process_runner(tmp_path: Path, git_executable: Path) -> None:
     """CommandGate runs argv only in the authorized cwd/executable, capturing both outcomes."""
     repo, base = _init_repository(tmp_path, git_executable)
@@ -318,7 +559,9 @@ async def test_profile_uses_safe_process_runner(tmp_path: Path, git_executable: 
         encoding="utf-8",
     )
     slow.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
-    process_runner = _RecordingProcessRunner(AsyncioProcessRunner(artifact_store))
+    process_runner = _RecordingProcessRunner(
+        AsyncioProcessRunner(artifact_store, sanitizer_factory=StreamingOutputSanitizer)
+    )
     process_policy = ProcessPolicy(
         allowed_executables=(passing, failing, slow),
         allowed_cwd_roots=(worktree_path,),
@@ -509,7 +752,7 @@ async def test_binary_secret_and_symlink_scan_fail_closed(tmp_path: Path) -> Non
     assert binary_result.status is GateStatus.FAILED
     finding = binary_result.findings[0]
     assert finding.path == "src/blob.bin"
-    assert finding.fingerprint == hashlib.sha256(_PRIVATE_KEY_MARKER).hexdigest()
+    assert finding.fingerprint == hashlib.sha256(detect_secrets(binary_secret)[0].value).hexdigest()
 
     symlink_context = GateContext(
         run_id=secret_context.run_id,
@@ -598,6 +841,52 @@ async def test_ignored_credential_is_blocked_without_mutating_index(
     assert "must-not-be-read" not in serialized
 
 
+async def test_ordinary_ignored_path_is_snapshotted_and_scope_checked(
+    tmp_path: Path,
+    git_executable: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Ignored files use the same inventory as the evaluation snapshot."""
+    repo, _ = _init_repository(tmp_path, git_executable)
+    (repo / ".gitignore").write_text("dist/\n", encoding="utf-8")
+    _run_git(git_executable, ["-C", str(repo), "add", "--", ".gitignore"], cwd=tmp_path)
+    _run_git(
+        git_executable, ["-C", str(repo), "commit", "--quiet", "-m", "ignore dist"], cwd=tmp_path
+    )
+    base = _run_git(git_executable, ["-C", str(repo), "rev-parse", "HEAD"], cwd=tmp_path)
+    factory_home = tmp_path / "factory-home"
+    artifact_store = FilesystemArtifactStore(factory_home)
+    run_id = RunId("run-1a2b3c4d5e6f")
+    task_id = TaskId("TASK-999")
+    context = _RepoContext(repo, factory_home, git_executable, artifact_store)
+    manager, worktree_path = await _prepare_workspace(context, base, run_id, task_id)
+    (worktree_path / "dist").mkdir()
+    (worktree_path / "dist" / "bundle.txt").write_text("artifact\n", encoding="utf-8")
+    _persist_spec(artifact_store, run_id, task_id, allowed_paths=("src/**",))
+    await _persist_run(factory_home / "state.db", run_id, task_id, base, str(worktree_path))
+    manager.close()
+    monkeypatch.setenv("AIF_FACTORY_HOME", str(factory_home))
+
+    exit_code, payload = await _run_validate_cli(capsys, run_id, "tests")
+
+    assert exit_code != 0
+    assert _gate_statuses(payload)["scope"] == "FAILED"
+    persisted = json.loads(
+        artifact_store.read(
+            ArtifactRef(
+                run_id=run_id,
+                relative_path=f"validations/{payload['snapshot_id']}.json",
+                kind=ArtifactKind.VALIDATION,
+            )
+        )
+    )
+    scope_findings = next(
+        result["findings"] for result in persisted["gate_results"] if result["gate_name"] == "scope"
+    )
+    assert any(finding["path"] == "dist/bundle.txt" for finding in scope_findings)
+
+
 async def test_external_persisted_worktree_is_rejected_before_git(
     tmp_path: Path,
     git_executable: Path,
@@ -644,7 +933,7 @@ async def test_gate_execution_error_is_persisted_and_later_gates_continue(
         diff_text="diff --git a/src/module.py b/src/module.py\n",
         diff_check_output="",
     )
-    runner = AsyncioProcessRunner(store)
+    runner = AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer)
     unauthorized = CommandGate(
         gate_name="compile",
         argv=(str(tmp_path / "missing"),),
@@ -708,7 +997,7 @@ async def test_command_mutation_invalidates_final_snapshot(tmp_path: Path) -> No
     gate = CommandGate(
         gate_name="tests",
         argv=(str(executable), str(target)),
-        process_runner=AsyncioProcessRunner(store),
+        process_runner=AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer),
         process_policy=ProcessPolicy(
             allowed_executables=(executable,),
             allowed_cwd_roots=(tmp_path,),
@@ -739,7 +1028,7 @@ def test_partial_profile_and_git_diff_tool_failure_fail_closed(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     executable = Path(sys.executable).resolve()
-    runner = AsyncioProcessRunner()
+    runner = AsyncioProcessRunner(sanitizer_factory=StreamingOutputSanitizer)
     policy = ProcessPolicy(
         allowed_executables=(executable,),
         allowed_cwd_roots=(tmp_path,),
@@ -780,21 +1069,6 @@ def test_partial_profile_and_git_diff_tool_failure_fail_closed(
             process_runner=runner,
             process_policy=policy,
             validation_commands=(("uv", "run", "pytest", str(tmp_path / "untrusted.py")),),
-        )
-
-    def fatal_git(
-        executable: Path, cwd: Path, args: tuple[str, ...]
-    ) -> subprocess.CompletedProcess[str]:
-        del executable, cwd
-        return subprocess.CompletedProcess(args, 128, "", "fatal")
-
-    monkeypatch.setattr(cli, "_run_controlled_git", fatal_git)
-    with pytest.raises(WorkspaceError, match="Git inspection failed"):
-        cli._git_diff_output(  # pyright: ignore[reportPrivateUsage]
-            executable,
-            tmp_path,
-            ("diff", "--check", "a" * 40, "--"),
-            diff_check=True,
         )
 
 

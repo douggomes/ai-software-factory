@@ -83,7 +83,7 @@ async def test_inventory_covers_ignored_binary_and_secret_evidence(
         encoding="utf-8",
     )
     (workspace.worktree_path / "README.md").write_text("changed\n", encoding="utf-8")
-    (workspace.worktree_path / "notes.txt").write_text("untracked\n", encoding="utf-8")
+    (workspace.worktree_path / "notes.txt").write_text("untracked \n", encoding="utf-8")
     (workspace.worktree_path / "cache.bin").write_bytes(b"binary\x00payload")
     (workspace.worktree_path / "local.secret").write_text(
         "token=repository-local-secret\n",
@@ -113,6 +113,7 @@ async def test_inventory_covers_ignored_binary_and_secret_evidence(
     assert snapshot.evidence.untracked_paths == ("notes.txt", "wide.json")
     assert snapshot.evidence.ignored_paths == (".npmrc", "cache.bin", "local.secret")
     assert snapshot.evidence.binary_paths == ("cache.bin",)
+    assert snapshot.evidence.diff_check_failed is True
     assert set(snapshot.evidence.changed_paths) == {
         ".npmrc",
         "README.md",

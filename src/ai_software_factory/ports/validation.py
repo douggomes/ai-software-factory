@@ -16,6 +16,7 @@ from enum import Enum, auto
 from pathlib import Path
 from typing import Final, Protocol, runtime_checkable
 
+from ai_software_factory.core.evaluation_workspace import RepositoryEvidence
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.process_models import ArtifactReference
 
@@ -132,14 +133,32 @@ class GateContext:
     changed_file_evidence: tuple[ChangedFileEvidence, ...]
     diff_text: str
     diff_check_output: str
+    evaluation_snapshot_id: str | None = None
+    evaluation_manifest_hash: str | None = None
+    evaluation_identity_hash: str | None = None
+    isolation_backend: str | None = None
+    isolation_policy_hash: str | None = None
+    repository_evidence: RepositoryEvidence | None = None
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "worktree_path", Path(self.worktree_path))
         if not self.worktree_path.is_absolute():
             raise ValueError("GateContext.worktree_path must be absolute")
         evidence_paths = tuple(item.path for item in self.changed_file_evidence)
-        if evidence_paths != self.changed_files:
+        if self.repository_evidence is None and evidence_paths != self.changed_files:
             raise ValueError("changed_file_evidence must correspond exactly to changed_files")
+        if (
+            self.repository_evidence is not None
+            and self.changed_files != self.repository_evidence.changed_paths
+        ):
+            raise ValueError("changed_files must correspond to repository evidence")
+        _validate_evaluation_evidence(
+            self.evaluation_snapshot_id,
+            self.evaluation_manifest_hash,
+            self.evaluation_identity_hash,
+            self.isolation_backend,
+            self.isolation_policy_hash,
+        )
 
 
 @runtime_checkable
@@ -180,6 +199,11 @@ class ValidationSnapshot:
     status: GateStatus
     gate_results: tuple[GateResult, ...]
     created_at: datetime
+    evaluation_snapshot_id: str | None = None
+    evaluation_manifest_hash: str | None = None
+    evaluation_identity_hash: str | None = None
+    isolation_backend: str | None = None
+    isolation_policy_hash: str | None = None
 
     def __post_init__(self) -> None:
         if not self.profile_name:
@@ -197,3 +221,41 @@ class ValidationSnapshot:
         )
         if self.status is not expected:
             raise ValueError("ValidationSnapshot.status is inconsistent with gate_results")
+        _validate_evaluation_evidence(
+            self.evaluation_snapshot_id,
+            self.evaluation_manifest_hash,
+            self.evaluation_identity_hash,
+            self.isolation_backend,
+            self.isolation_policy_hash,
+        )
+
+
+def _validate_evaluation_evidence(
+    snapshot_id: str | None,
+    manifest_hash: str | None,
+    identity_hash: str | None,
+    isolation_backend: str | None,
+    isolation_policy_hash: str | None,
+) -> None:
+    snapshot_values = (snapshot_id, manifest_hash, identity_hash)
+    if any(value is not None for value in snapshot_values) and any(
+        value is None for value in snapshot_values
+    ):
+        raise ValueError("evaluation snapshot evidence must be complete")
+    if snapshot_id is not None and not re.fullmatch(r"snap-[0-9a-f]{12}", snapshot_id):
+        raise ValueError("evaluation snapshot id is invalid")
+    for label, value in (
+        ("evaluation manifest hash", manifest_hash),
+        ("evaluation identity hash", identity_hash),
+    ):
+        if value is not None and not _SHA256_HEX_PATTERN.match(value):
+            raise ValueError(f"invalid {label}: {value!r}")
+    isolation_values = (isolation_backend, isolation_policy_hash)
+    if any(value is not None for value in isolation_values) and any(
+        value is None for value in isolation_values
+    ):
+        raise ValueError("isolation evidence must be complete")
+    if isolation_backend is not None and isolation_backend not in {"docker", "podman"}:
+        raise ValueError("isolation backend is invalid")
+    if isolation_policy_hash is not None and not _SHA256_HEX_PATTERN.match(isolation_policy_hash):
+        raise ValueError("isolation policy hash is invalid")

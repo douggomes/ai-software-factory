@@ -86,6 +86,7 @@ def _snapshot_factory(tmp_path: Path) -> Callable[[], EvaluationSnapshot]:
 def test_git_adapter_implements_narrow_snapshot_contracts() -> None:
     assert issubclass(GitEvaluationWorkspace, EvaluationWorkspace)
     assert issubclass(GitEvaluationWorkspace, RepositoryInspection)
+    assert "verify_source_current" in EvaluationWorkspace.__dict__
     assert tuple(EvaluationCaptureRequest.__dataclass_fields__) == (
         "workspace",
         "max_files",
@@ -105,7 +106,10 @@ def test_git_adapter_implements_narrow_snapshot_contracts() -> None:
     )
     lifecycle_default = EvaluationSnapshot.__dataclass_fields__["lifecycle"].default
     assert lifecycle_default is SnapshotLifecycle.VERIFIED
-    assert tuple(RepositoryEvidence.__dataclass_fields__)[-1] == "diff_hash"
+    assert tuple(RepositoryEvidence.__dataclass_fields__)[-2:] == (
+        "diff_hash",
+        "diff_check_failed",
+    )
 
 
 def test_evaluation_contract_defaults_limits_and_immutability(tmp_path: Path) -> None:

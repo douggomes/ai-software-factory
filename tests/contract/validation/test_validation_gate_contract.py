@@ -10,6 +10,7 @@ import pytest
 
 from ai_software_factory.adapters.persistence.artifact_store import FilesystemArtifactStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.process_models import ProcessPolicy, TrustProfile
 from ai_software_factory.evaluation.gates import CommandGate, DiffGate, ScopeGate, SecretGate
@@ -75,7 +76,7 @@ async def test_command_gate_contract(tmp_path: Path) -> None:
     gate: ValidationGate = CommandGate(
         gate_name="ok",
         argv=(str(executable),),
-        process_runner=AsyncioProcessRunner(store),
+        process_runner=AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer),
         process_policy=ProcessPolicy(
             allowed_executables=(executable,), allowed_cwd_roots=(tmp_path,)
         ),

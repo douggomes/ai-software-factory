@@ -76,7 +76,11 @@ def _python_command_gates(
         raise ProfileConfigurationError(
             "SPEC validation commands do not match registered profile 'tests'"
         )
-    uv = str(uv_executable)
+    if not uv_executable.is_absolute():
+        raise ProfileConfigurationError("resolved uv executable must be absolute")
+    # OCI receives only fixed in-container command names. The composition root
+    # separately validates the host ``uv_executable`` before this profile is built.
+    uv = "uv"
     gates = (
         CommandGate(
             gate_name="compile",

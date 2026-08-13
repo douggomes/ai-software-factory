@@ -18,6 +18,7 @@ from pathlib import Path, PurePosixPath
 from typing import Final, cast
 
 from ai_software_factory.core.evaluation_workspace import (
+    DEFAULT_MAX_EVALUATION_FILES,
     EvaluationCaptureRequest,
     EvaluationSnapshot,
     FileClassification,
@@ -103,6 +104,7 @@ class _SourceContent:
     binary: bool
     stat_identity: tuple[int, int, int, int, int]
     findings: tuple[SecretFinding, ...]
+    diff_check_failed: bool
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,13 +157,19 @@ class GitEvaluationWorkspace(EvaluationWorkspace, RepositoryInspection):
                 )
                 with _private_git_control(workspace, git_directory) as git_control:
                     before = await self._git_state(workspace, source_identity, git_control)
+                    diff_check_failed = await self._git_diff_check(workspace, git_control)
                     classifications = _classifications(before, request.max_files)
                     staging, final_root = _prepare_staging(workspace, snapshot_id)
-                    entries, findings = _materialize(
+                    entries, findings, content_diff_check_failed = _materialize(
                         source_fd,
                         staging,
                         classifications,
                         request.max_total_bytes,
+                        frozenset(
+                            set(before.changed_tracked)
+                            | set(before.untracked)
+                            | set(before.ignored)
+                        ),
                     )
                     _verify_stable_git_state(
                         source_fd,
@@ -176,7 +184,13 @@ class GitEvaluationWorkspace(EvaluationWorkspace, RepositoryInspection):
                     _verify_source(source_fd, entries)
                     manifest_hash_seed = _entries_hash(entries)
                     diff_hash = _diff_hash(before, manifest_hash_seed)
-                    evidence = _evidence(before, entries, findings, diff_hash)
+                    evidence = _evidence(
+                        before,
+                        entries,
+                        findings,
+                        diff_hash,
+                        diff_check_failed or content_diff_check_failed,
+                    )
                     manifest_bytes = _manifest_bytes(
                         snapshot_id,
                         workspace,
@@ -232,6 +246,50 @@ class GitEvaluationWorkspace(EvaluationWorkspace, RepositoryInspection):
                     _remove_owned_staging(staging)
                     if final_created:
                         _remove_owned_snapshot(final_root.parent, workspace, snapshot_id)
+        finally:
+            lock_lease.close()
+
+    async def verify_source_current(self, snapshot: EvaluationSnapshot) -> None:
+        """Prove that a source remained identical for a completed evaluation."""
+        workspace = _authorize_workspace(snapshot.workspace)
+        self.inspect(snapshot)
+        lock_lease = _borrow_lock_lease(self._lock_capability, workspace)
+        try:
+            _assert_lock_lease_active(lock_lease)
+            source_fd = _open_directory(workspace.worktree_path)
+            source_identity = _directory_identity(os.fstat(source_fd))
+            try:
+                git_directory = _verify_git_and_source_identity(
+                    source_fd, workspace, source_identity
+                )
+                with _private_git_control(workspace, git_directory) as git_control:
+                    state = await self._git_state(workspace, source_identity, git_control)
+                    expected_classifications = tuple(
+                        (entry.path, entry.classification) for entry in snapshot.entries
+                    )
+                    if _classifications(state, len(snapshot.entries)) != expected_classifications:
+                        raise EvaluationWorkspaceChangedError(
+                            "workspace classification changed during evaluation"
+                        )
+                    _verify_source(source_fd, snapshot.entries)
+                    _verify_final_source(
+                        source_fd,
+                        workspace,
+                        source_identity,
+                        snapshot.entries,
+                        DEFAULT_MAX_EVALUATION_FILES,
+                    )
+                    if (
+                        _diff_hash(state, _entries_hash(snapshot.entries))
+                        != snapshot.evidence.diff_hash
+                    ):
+                        raise EvaluationWorkspaceChangedError(
+                            "workspace Git state changed during evaluation"
+                        )
+                    _verify_git_control(git_control)
+                    _assert_lock_lease_active(lock_lease)
+            finally:
+                os.close(source_fd)
         finally:
             lock_lease.close()
 
@@ -335,6 +393,27 @@ class GitEvaluationWorkspace(EvaluationWorkspace, RepositoryInspection):
         control: _GitControl,
         arguments: tuple[str, ...],
     ) -> bytes:
+        returncode, output = await self._git_result(workspace, control, arguments)
+        if returncode != 0:
+            raise EvaluationWorkspaceCommandError("bounded Git metadata command failed")
+        return output
+
+    async def _git_diff_check(self, workspace: Workspace, control: _GitControl) -> bool:
+        returncode, _ = await self._git_result(
+            workspace,
+            control,
+            ("diff", "--no-ext-diff", "--no-textconv", "--check", "HEAD", "--"),
+        )
+        if returncode not in (0, 1):
+            raise EvaluationWorkspaceCommandError("bounded Git diff check failed")
+        return returncode == 1
+
+    async def _git_result(
+        self,
+        workspace: Workspace,
+        control: _GitControl,
+        arguments: tuple[str, ...],
+    ) -> tuple[int, bytes]:
         attempt_id = AttemptId(f"att-{uuid.uuid4().hex[:12]}")
         request = ProcessRequest(
             argv=(
@@ -366,9 +445,11 @@ class GitEvaluationWorkspace(EvaluationWorkspace, RepositoryInspection):
             _verify_git_control(control)
             result = await self._process_runner.run(request)
             _verify_git_control(control)
-            if result.returncode != 0 or result.truncated or result.stdout_ref is None:
+            if result.truncated or result.stdout_ref is None:
                 raise EvaluationWorkspaceCommandError("bounded Git metadata command failed")
-            return self._artifact_store.read(cast(ArtifactRef, result.stdout_ref))
+            return result.returncode, self._artifact_store.read(
+                cast(ArtifactRef, result.stdout_ref)
+            )
         except EvaluationWorkspaceCommandError:
             raise
         except (ArtifactError, OSError, ProcessExecutionError, ValueError) as error:
@@ -562,11 +643,13 @@ def _materialize(
     staging_root: Path,
     classifications: tuple[tuple[str, FileClassification], ...],
     max_total_bytes: int,
-) -> tuple[tuple[ManifestEntry, ...], tuple[SecretFinding, ...]]:
+    changed_paths: frozenset[str],
+) -> tuple[tuple[ManifestEntry, ...], tuple[SecretFinding, ...], bool]:
     entries: list[ManifestEntry] = []
     all_findings: set[SecretFinding] = set()
     evidence_bytes = 0
     total_bytes = 0
+    content_diff_check_failed = False
     for relative_path, classification in classifications:
         credential_finding = _credential_path_finding(relative_path)
         try:
@@ -594,6 +677,8 @@ def _materialize(
         total_bytes += content.size_bytes
         if total_bytes > max_total_bytes:
             raise EvaluationWorkspacePolicyError("evaluation bytes exceed policy")
+        if relative_path in changed_paths:
+            content_diff_check_failed = content_diff_check_failed or content.diff_check_failed
         findings = set(content.findings)
         if credential_finding is not None:
             findings.add(credential_finding)
@@ -617,7 +702,11 @@ def _materialize(
                 binary=content.binary,
             )
         )
-    return tuple(entries), tuple(sorted(all_findings, key=lambda item: (item.path, item.kind)))
+    return (
+        tuple(entries),
+        tuple(sorted(all_findings, key=lambda item: (item.path, item.kind))),
+        content_diff_check_failed,
+    )
 
 
 def _merge_secret_findings(
@@ -647,6 +736,8 @@ def _scan_source_file(root_fd: int, relative_path: str, max_bytes: int) -> _Sour
         total = 0
         binary = False
         tail = b""
+        line_tail = b""
+        diff_check_failed = False
         findings: set[SecretFinding] = set()
         finding_bytes = 0
         while True:
@@ -658,6 +749,8 @@ def _scan_source_file(root_fd: int, relative_path: str, max_bytes: int) -> _Sour
             if total > max_bytes:
                 raise EvaluationWorkspacePolicyError("evaluation bytes exceed policy")
             binary = binary or b"\x00" in chunk
+            line_tail, violation = _scan_diff_check_lines(line_tail, chunk)
+            diff_check_failed = diff_check_failed or violation
             scan_data = tail + chunk
             finding_bytes = _merge_secret_findings(
                 findings,
@@ -677,6 +770,21 @@ def _scan_source_file(root_fd: int, relative_path: str, max_bytes: int) -> _Sour
         binary=binary,
         stat_identity=before_identity,
         findings=tuple(sorted(findings, key=lambda item: (item.path, item.kind))),
+        diff_check_failed=diff_check_failed or _diff_check_line_violation(line_tail),
+    )
+
+
+def _scan_diff_check_lines(tail: bytes, chunk: bytes) -> tuple[bytes, bool]:
+    combined = tail + chunk
+    lines = combined.splitlines(keepends=True)
+    tail = lines.pop() if lines and not lines[-1].endswith((b"\n", b"\r")) else b""
+    return tail, any(_diff_check_line_violation(line) for line in lines)
+
+
+def _diff_check_line_violation(line: bytes) -> bool:
+    content = line.rstrip(b"\r\n")
+    return content.endswith((b" ", b"\t")) or content.startswith(
+        (b"<<<<<<<", b"=======", b">>>>>>>")
     )
 
 
@@ -779,6 +887,7 @@ def _evidence(
     entries: tuple[ManifestEntry, ...],
     findings: tuple[SecretFinding, ...],
     diff_hash: str,
+    diff_check_failed: bool,
 ) -> RepositoryEvidence:
     binary = tuple(sorted(entry.path for entry in entries if entry.binary))
     changed = tuple(sorted(set(state.changed_tracked) | set(state.untracked) | set(state.ignored)))
@@ -790,6 +899,7 @@ def _evidence(
         binary_paths=binary,
         secret_findings=findings,
         diff_hash=diff_hash,
+        diff_check_failed=diff_check_failed,
     )
 
 
@@ -810,6 +920,7 @@ def _manifest_bytes(
         "head_commit": head_commit,
         "lifecycle": SnapshotLifecycle.VERIFIED.value,
         "diff_hash": evidence.diff_hash,
+        "diff_check_failed": evidence.diff_check_failed,
         "entries": [
             {
                 "path": entry.path,

@@ -15,6 +15,7 @@ from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 from typing import Final
 
+from ai_software_factory.core.evaluation_workspace import detect_secrets
 from ai_software_factory.core.process_models import (
     DEFAULT_MAX_OUTPUT_BYTES,
     ProcessPolicy,
@@ -30,14 +31,6 @@ from ai_software_factory.ports.validation import (
     GateStatus,
 )
 
-_SECRET_PATTERNS: Final[tuple[tuple[str, re.Pattern[bytes]], ...]] = (
-    ("PRIVATE_KEY", re.compile(rb"-----BEGIN (?:RSA |EC |OPENSSH |DSA )?PRIVATE KEY-----")),
-    (
-        "ASSIGNMENT_SECRET",
-        re.compile(rb"(?i)\b(password|passwd|secret|token|api[_-]?key)\b\s*[:=]\s*\S+"),
-    ),
-    ("AWS_ACCESS_KEY", re.compile(rb"\bAKIA[0-9A-Z]{16}\b")),
-)
 _DOTENV_NAME_PATTERN: Final[re.Pattern[str]] = re.compile(r"(^|/)\.env(\..+)?$")
 _CREDENTIAL_FILE_NAMES: Final[frozenset[str]] = frozenset({"id_rsa", "id_ed25519", "auth.json"})
 DEFAULT_COMMAND_TIMEOUT_SECONDS: Final[float] = 900.0
@@ -68,7 +61,7 @@ def _scope_finding(path: str) -> GateFinding:
 
 def _safe_evidence_path(path: str) -> str:
     encoded = path.encode("utf-8", errors="surrogateescape")
-    if any(pattern.search(encoded) for _, pattern in _SECRET_PATTERNS):
+    if detect_secrets(encoded):
         return f"<redacted-path:{_fingerprint(encoded)[:12]}>"
     return path
 
@@ -109,9 +102,19 @@ class DiffGate:
 
     async def evaluate(self, context: GateContext) -> GateResult:
         findings: list[GateFinding] = []
-        if not context.diff_text.strip():
+        has_changes = (
+            bool(context.repository_evidence.changed_paths)
+            if context.repository_evidence is not None
+            else bool(context.diff_text.strip())
+        )
+        diff_check_failed = (
+            context.repository_evidence.diff_check_failed
+            if context.repository_evidence is not None
+            else bool(context.diff_check_output.strip())
+        )
+        if not has_changes:
             findings.append(GateFinding(code="EMPTY_DIFF", message="no changes to validate"))
-        if context.diff_check_output.strip():
+        if diff_check_failed:
             findings.append(
                 GateFinding(
                     code="DIFF_CHECK_FAILED",
@@ -136,6 +139,19 @@ class SecretGate:
 
     async def evaluate(self, context: GateContext) -> GateResult:
         findings: list[GateFinding] = [*_credential_path_findings(context.changed_files)]
+        if context.repository_evidence is not None:
+            remaining = MAX_SECRET_FINDINGS - len(findings)
+            findings.extend(
+                GateFinding(
+                    code=f"SECRET_PATTERN_{finding.kind.upper().replace('-', '_')}",
+                    message=f"changed file matches a {finding.kind.replace('-', ' ')} pattern",
+                    path=_safe_evidence_path(finding.path),
+                    fingerprint=finding.fingerprint,
+                )
+                for finding in context.repository_evidence.secret_findings[:remaining]
+            )
+            status = GateStatus.FAILED if findings else GateStatus.PASSED
+            return GateResult(gate_name=self.name, status=status, findings=tuple(findings))
         for evidence in context.changed_file_evidence:
             if len(findings) >= MAX_SECRET_FINDINGS:
                 break
@@ -180,18 +196,18 @@ def _credential_path_findings(changed_files: tuple[str, ...]) -> list[GateFindin
 def _secret_pattern_findings(path: str, content: bytes, *, limit: int) -> list[GateFinding]:
     findings: list[GateFinding] = []
     safe_path = _safe_evidence_path(path)
-    for code, pattern in _SECRET_PATTERNS:
-        for match in pattern.finditer(content):
-            if len(findings) >= limit:
-                return findings
-            findings.append(
-                GateFinding(
-                    code=f"SECRET_PATTERN_{code}",
-                    message=f"changed file matches a {code.lower().replace('_', ' ')} pattern",
-                    path=safe_path,
-                    fingerprint=_fingerprint(match.group(0)),
-                )
+    for detected in detect_secrets(content):
+        if len(findings) >= limit:
+            return findings
+        code = detected.kind.upper().replace("-", "_")
+        findings.append(
+            GateFinding(
+                code=f"SECRET_PATTERN_{code}",
+                message=f"changed file matches a {detected.kind.replace('-', ' ')} pattern",
+                path=safe_path,
+                fingerprint=_fingerprint(detected.value),
             )
+        )
     return findings
 
 

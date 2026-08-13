@@ -10,7 +10,7 @@ from __future__ import annotations
 import hashlib
 import json
 import uuid
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from datetime import UTC, datetime
 
@@ -55,7 +55,7 @@ def _overall_status(results: tuple[GateResult, ...]) -> GateStatus:
 class Evaluator:
     """Runs every gate in a profile, in order, against one bound context."""
 
-    def __init__(
+    def __init__(  # noqa: PLR0913 - explicit policy seams are dependency-injected
         self,
         context: GateContext,
         artifact_store: ArtifactStore,
@@ -63,12 +63,14 @@ class Evaluator:
         snapshot_id_factory: Callable[[], SnapshotId] = _new_snapshot_id,
         clock: Callable[[], datetime] = _utc_now,
         context_refresh: Callable[[], GateContext] | None = None,
+        source_verifier: Callable[[], Awaitable[bool]] | None = None,
     ) -> None:
         self._context = context
         self._artifact_store = artifact_store
         self._snapshot_id_factory = snapshot_id_factory
         self._clock = clock
         self._context_refresh = context_refresh
+        self._source_verifier = source_verifier
 
     async def run(self, profile: ValidationProfile) -> ValidationSnapshot:
         """Execute every gate in ``profile.gates``, in stable declared order.
@@ -100,6 +102,8 @@ class Evaluator:
             if _context_hash(refreshed) != _context_hash(self._context):
                 snapshot_context = refreshed
                 results = await _refresh_structural_results(profile, tuple(results), refreshed)
+        if self._source_verifier is not None and not await self._source_verifier():
+            results = _invalidate_for_source_change(profile, tuple(results))
         snapshot = ValidationSnapshot(
             snapshot_id=self._snapshot_id_factory(),
             run_id=snapshot_context.run_id,
@@ -107,10 +111,19 @@ class Evaluator:
             base_commit=snapshot_context.base_commit,
             profile_name=profile.name,
             profile_hash=profile.config_hash,
-            diff_hash=_diff_hash(snapshot_context.diff_text),
+            diff_hash=(
+                snapshot_context.repository_evidence.diff_hash
+                if snapshot_context.repository_evidence is not None
+                else _diff_hash(snapshot_context.diff_text)
+            ),
             status=_overall_status(tuple(results)),
             gate_results=tuple(results),
             created_at=self._clock(),
+            evaluation_snapshot_id=snapshot_context.evaluation_snapshot_id,
+            evaluation_manifest_hash=snapshot_context.evaluation_manifest_hash,
+            evaluation_identity_hash=snapshot_context.evaluation_identity_hash,
+            isolation_backend=snapshot_context.isolation_backend,
+            isolation_policy_hash=snapshot_context.isolation_policy_hash,
         )
         self._persist(snapshot)
         return snapshot
@@ -150,9 +163,30 @@ def _snapshot_to_dict(
         "diff_hash": snapshot.diff_hash,
         "status": snapshot.status.name,
         "created_at": snapshot.created_at.isoformat(),
+        "evaluation_snapshot": _evaluation_snapshot_evidence(snapshot),
+        "isolation": _isolation_evidence(snapshot),
         "gate_results": [
             _gate_result_to_dict(result, artifact_store) for result in snapshot.gate_results
         ],
+    }
+
+
+def _evaluation_snapshot_evidence(snapshot: ValidationSnapshot) -> dict[str, str] | None:
+    if snapshot.evaluation_snapshot_id is None:
+        return None
+    return {
+        "snapshot_id": snapshot.evaluation_snapshot_id,
+        "manifest_hash": str(snapshot.evaluation_manifest_hash),
+        "identity_hash": str(snapshot.evaluation_identity_hash),
+    }
+
+
+def _isolation_evidence(snapshot: ValidationSnapshot) -> dict[str, str] | None:
+    if snapshot.isolation_backend is None:
+        return None
+    return {
+        "backend": snapshot.isolation_backend,
+        "policy_hash": str(snapshot.isolation_policy_hash),
     }
 
 
@@ -226,4 +260,30 @@ async def _refresh_structural_results(
                 ),
             )
         refreshed_results.append(current)
+    return refreshed_results
+
+
+def _invalidate_for_source_change(
+    profile: ValidationProfile,
+    original_results: tuple[GateResult, ...],
+) -> list[GateResult]:
+    """Keep gate evidence while making a post-gate source change explicit."""
+    refreshed_results: list[GateResult] = []
+    for gate, result in zip(profile.gates, original_results, strict=True):
+        if gate.name != "diff":
+            refreshed_results.append(result)
+            continue
+        refreshed_results.append(
+            replace(
+                result,
+                status=GateStatus.FAILED,
+                findings=(
+                    *result.findings,
+                    GateFinding(
+                        code="WORKTREE_CHANGED_DURING_VALIDATION",
+                        message="worktree changed while mandatory gates were running",
+                    ),
+                ),
+            )
+        )
     return refreshed_results
