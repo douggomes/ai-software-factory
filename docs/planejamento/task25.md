@@ -3,7 +3,7 @@ title: "TASK-025 — Harness de benchmark reproduzível"
 task_id: TASK-025
 release: "V0.5"
 status: planned
-depends_on: [TASK-024]
+depends_on: [TASK-034]
 baseline_commit: "TO_BE_PINNED"
 risk_level: high
 ---
@@ -27,8 +27,8 @@ A Factory valida e executa manifests de benchmark em bases Git imutáveis com re
 
 ## Precondições
 
-- V0.4 aprovada na TASK-024.
-- Baseline fixado no commit aprovado da TASK-024.
+- V0.4 aprovada na TASK-024 e as capacidades TASK-033/TASK-034 aprovadas.
+- Baseline fixado no commit aprovado da TASK-034.
 - Repositório irmão factory-lab pode ser configurado sem ser criado implicitamente.
 
 ## Arquivos permitidos

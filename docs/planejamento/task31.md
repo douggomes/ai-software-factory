@@ -15,7 +15,7 @@ risk_level: critical
 
 ## Valor entregue
 
-A V1.1 é entregue com dataset ampliado, evidência, supply-chain assurance, documentação operacional e limites explícitos.
+A V1.1 é entregue com dataset ampliado, evidência, supply-chain assurance, documentação operacional, pesquisa oficial controlada, governança greenfield e limites explícitos.
 
 ## Definition of Ready
 
@@ -30,6 +30,7 @@ A V1.1 é entregue com dataset ampliado, evidência, supply-chain assurance, doc
 - TASK-030 aprovada com scheduler isolado.
 - Baseline fixado no commit aprovado da TASK-030.
 - Todas as releases anteriores possuem dossiers e raw evidence.
+- O dossier V0.5 referencia os manifests/evidências aprovados das TASK-033/TASK-034.
 
 ## Arquivos permitidos
 
@@ -59,7 +60,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | `PR suite` | Offline: unit/contract/infrastructure/E2E/security/chaos sem tokens. |
 | `Release suite` | 20 tasks uma vez + 5 estratificadas três vezes nas arquiteturas escolhidas. |
 | `Research suite` | 20×3×arquiteturas somente opt-in com budget/quota explícitos. |
-| `Release dossier` | Requirement→task→test→evidence; commit/lock/config/SBOM/build hashes e approval. |
+| `Release dossier` | Requirement→task→test→evidence; commit/lock/config/SBOM/build hashes, documentação confiável, profiles greenfield e approval. |
 
 ## Defaults e decisões fechadas
 
@@ -89,7 +90,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 - [ ] **AC-001** — 20 tasks e repetições definidas geram raw results com média, dispersão, sample size e failure categories.
 - [ ] **AC-002** — PR suite offline e gates de arquitetura/typing/test/security/supply chain passam em Python 3.13/3.14.
-- [ ] **AC-003** — Dossier contém SBOM/provenance/checksums/threat-model/rollback/limitations e aprovação humana pendente exata.
+- [ ] **AC-003** — Dossier contém SBOM/provenance/checksums/threat-model/rollback/limitations, evidências TASK-033/TASK-034 íntegras e aprovação humana pendente exata.
 
 ## Matriz de verificação
 
@@ -97,7 +98,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|---|---|
 | AC-001 | `uv run pytest tests/release/test_v1_1.py::test_dataset_and_statistics_are_traceable -q` | raw results e estatística descritiva válidos | results.json + report.md |
 | AC-002 | `uv run pytest tests/release/test_v1_1.py::test_quality_security_and_supply_chain_gates -q` | todos os gates/suppressions policy aprovados | gate bundle + SBOM |
-| AC-003 | `uv run pytest tests/release/test_v1_1.py::test_release_dossier_has_complete_traceability -q` | matriz sem lacunas e hashes verificáveis | release dossier + checksums |
+| AC-003 | `uv run pytest tests/release/test_v1_1.py::test_release_dossier_has_complete_traceability -q` | matriz sem lacunas, inclusive gateway/governança, e hashes verificáveis | release dossier + checksums |
 
 ## Validação manual no terminal
 

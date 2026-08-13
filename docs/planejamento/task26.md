@@ -15,7 +15,7 @@ risk_level: critical
 
 ## Valor entregue
 
-Cinco tasks reais medem arquiteturas A/B/C sem vazar hidden tests ou executar origem não confiável no host.
+Cinco tasks reais medem arquiteturas A/B/C sem vazar hidden tests ou executar origem não confiável no host, e o dossier V0.5 comprova também o gateway documental e o bootstrap greenfield.
 
 ## Definition of Ready
 
@@ -30,6 +30,7 @@ Cinco tasks reais medem arquiteturas A/B/C sem vazar hidden tests ou executar or
 - TASK-025 aprovada com harness fake.
 - Baseline fixado no commit aprovado da TASK-025.
 - Factory-lab possui commits-base revisados e trust classification explícita.
+- Evidências aprovadas da TASK-033 e da TASK-034 estão referenciáveis por commit, schema e hash.
 
 ## Arquivos permitidos
 
@@ -54,7 +55,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|
 | `dataset v0.5` | Feature, bugfix, tests, refactor e security/idempotency; cada uma com commit SHA. |
 | `HiddenTestProvider` config | Root privada fora do worktree; entregue somente ao evaluator após worker. |
-| `V0.5 report` | Raw results, sample size, first/final pass, repairs, failures e limitations. |
+| `V0.5 report` | Raw results, sample size, first/final pass, repairs, failures, limitations e matriz de evidências TASK-033/TASK-034. |
 
 ## Defaults e decisões fechadas
 
@@ -71,19 +72,22 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 1. Versionar manifest/commits-base e critérios das cinco tasks.
 2. Implementar/configurar hidden test injection fora do contexto.
 3. Executar security isolation e A/B/C com budgets iguais.
-4. Produzir raw results e dossier V0.5 sem extrapolação.
+4. Verificar evidence/schema hashes do gateway documental e golden manifests/profiles do bootstrap.
+5. Produzir raw results e dossier V0.5 sem extrapolação.
 
 ## Riscos e controles
 
 | Risco | Controle obrigatório | Teste negativo |
 |---|---|---|
 | Hidden test vazar ou repo comprometer host | Evaluator-only e isolamento forte/fail-closed | `test_worker_cannot_discover_hidden_tests_or_host` |
+| Release omitir segurança documental ou governança greenfield | Dossier exige evidência pinada das TASK-033/TASK-034 | `test_release_requires_documentation_and_governance_evidence` |
 
 ## Critérios de aceite
 
 - [ ] **AC-001** — Worker/context/MCP/telemetry não conseguem listar, ler ou inferir hidden tests antes da avaliação.
 - [ ] **AC-002** — Traversal/symlink/hook/subprocess do dataset não alcança home/hidden tests; untrusted sem sandbox falha.
 - [ ] **AC-003** — Cinco commits-base executam A/B/C com raw results e relatório/dossier reproduzíveis.
+- [ ] **AC-004** — Dossier rejeita ausência, hash divergente ou schema incompatível nas evidências da TASK-033/TASK-034.
 
 ## Matriz de verificação
 
@@ -92,13 +96,14 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | AC-001 | `uv run pytest tests/security/test_hidden_test_isolation.py::test_worker_cannot_discover_hidden_tests_or_host -q` | zero paths/content leaked | context/tool/telemetry scans |
 | AC-002 | `uv run pytest tests/security/test_hidden_test_isolation.py::test_untrusted_dataset_requires_strong_isolation -q` | host canaries intactos e fail-closed | isolation capability report |
 | AC-003 | `uv run pytest tests/release/test_v0_5.py -q` | dataset/hash/result schemas aprovados | results.json + dossier V0.5 |
+| AC-004 | `uv run pytest tests/release/test_v0_5.py::test_release_requires_documentation_and_governance_evidence -q` | evidence e governance manifests pinados e íntegros | matriz TASK-033/TASK-034 no dossier |
 
 ## Validação manual no terminal
 
 1. `uv run pytest tests/security/test_hidden_test_isolation.py -q`
    Esperado: Hidden tests e canários do host permanecem invisíveis ao worker.
 2. `uv run pytest tests/release/test_v0_5.py -q`
-   Esperado: As cinco tasks e arquiteturas A/B/C passam o gate V0.5.
+   Esperado: As cinco tasks, arquiteturas A/B/C, evidências documentais e profiles greenfield passam o gate V0.5.
 
 O agente imprime esta seção com `python3 scripts/show_manual_validation.py TASK-026` antes de publicar o draft PR.
 

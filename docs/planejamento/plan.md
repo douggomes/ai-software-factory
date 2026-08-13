@@ -1,9 +1,9 @@
 ---
 title: Plano de implementação da AI Software Factory
 status: ready
-version: "1.3"
+version: "1.4"
 target_release: "V1.1"
-date: 2026-08-12
+date: 2026-08-13
 tags:
   - ai-software-factory
   - python
@@ -15,7 +15,7 @@ tags:
 
 ## 1. Resultado esperado
 
-Entregar uma Factory local, assíncrona e auditável que transforma uma SPEC em alterações isoladas, valida evidências, troca de worker sem perder trabalho, repara falhas de qualidade, solicita revisão independente, preserva aprovação humana e mede objetivamente arquiteturas agentic.
+Entregar uma Factory local, assíncrona e auditável que transforma uma SPEC em alterações isoladas, valida evidências, troca de worker sem perder trabalho, repara falhas de qualidade, solicita revisão independente, preserva aprovação humana, consulta documentação oficial de forma controlada, estabelece governança em projetos greenfield e mede objetivamente arquiteturas agentic.
 
 O plano começa em um diretório vazio e termina na V1.1. As decisões que resolveram ambiguidades estão em [brainstorming.md](brainstorming.md).
 O runtime cloud-only e sua fronteira de dados são normatizados pelo
@@ -39,6 +39,8 @@ O runtime cloud-only e sua fronteira de dados são normatizados pelo
 - AgentPool, Failure Normalizer, Circuit Breaker e Continuation Package;
 - reviewer independente, repair loop e human gate;
 - Context Builder determinístico e MCP semântico via stdio;
+- gateway de documentação versionada com fontes oficiais e Context7 complementar;
+- bootstrap de governança agnóstico para projetos greenfield backend, frontend, mobile e infraestrutura;
 - traces/métricas OpenTelemetry e logs JSONL;
 - benchmark com base Git imutável e hidden tests;
 - retomada idempotente, timeout, cancellation e chaos tests;
@@ -74,6 +76,8 @@ O runtime cloud-only e sua fronteira de dados são normatizados pelo
 13. Approval humana é obrigatória até a V1.1 e vincula o hash exato do diff e o base commit.
 14. Toda operação externa tem timeout, cancelamento, limite de recursos e resultado persistido.
 15. Sem isolamento forte, código de repositório não confiável não é executado no host.
+16. Documentação externa é dado não confiável; fonte oficial versionada prevalece e Context7 nunca autoriza ação ou sustenta sozinho claim crítica.
+17. Projeto greenfield não recebe código antes de gerar e validar sua governança; projeto preexistente nunca tem regras sobrescritas automaticamente.
 
 ## 4. Arquitetura de alto nível
 
@@ -84,6 +88,8 @@ flowchart LR
     App --> Core["Domain Core + State Machine"]
     App --> Spec["Spec Parser"]
     App --> Context["Context Builder"]
+    App --> Docs["Documentation Research"]
+    App --> Governance["Greenfield Governance"]
     App --> Pool["Agent Pool + Router"]
     App --> Eval["Deterministic Evaluator"]
     App --> Review["Reviewer + Repair"]
@@ -99,6 +105,10 @@ flowchart LR
     Persist --> Artifacts[("Artifacts")]
     Workspace --> Worktree[("Git worktree")]
     Context --> MCP["Factory MCP server"]
+    Docs --> Official["Official versioned docs"]
+    Docs --> Context7["Context7 (supplementary)"]
+    Governance --> TargetRules[("Target AGENTS + standards")]
+    Docs --> Governance
     Eval --> Worktree
     Review --> Worktree
 ```
@@ -301,7 +311,9 @@ ai-software-factory/
 │   │   └── workspace.py
 │   ├── adapters/
 │   │   ├── agents/
+│   │   ├── documentation/
 │   │   ├── git/
+│   │   ├── governance/
 │   │   ├── persistence/
 │   │   └── process/
 │   ├── evaluation/
@@ -363,6 +375,8 @@ Tabelas mínimas:
 │   ├── spec.md
 │   ├── plan.json
 │   ├── context-manifest.json
+│   ├── documentation/
+│   ├── governance/
 │   ├── checkpoints/
 │   ├── validations/
 │   ├── reviews/
@@ -387,6 +401,10 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 | `Planner` | Produzir `PlanResult` estruturado por um worker cloud read-only ou fallback determinístico |
 | `ValidationGate` | Produzir evidência determinística e persistível |
 | `ContextBuilder` | Criar manifest com proveniência e hashes |
+| `DocumentationResearch` | Produzir evidência versionada, limitada e sanitizada a partir de fontes autorizadas |
+| `DocumentationSource` | Consultar documentação oficial, Context7 ou cache sob o mesmo contrato |
+| `ProjectGovernanceBootstrap` | Gerar pacote normativo determinístico somente para alvo greenfield autorizado |
+| `GovernanceValidator` | Bloquear geração de código até manifest, regras, hashes e evidências serem válidos |
 | `Reviewer` | Mapear cada AC para pass/fail/unknown + evidência |
 | `TaskScheduler` | Executar uma DAG sem dois writers na mesma task |
 
@@ -398,7 +416,7 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 | V0.2 | 15–18 | Codex reviewer, repair limitado e aprovação/commit seguros | ACs estruturados; repair revalida; approval exata e TOCTOU testado |
 | V0.3 | 19–22 | Contexto, Claude, planner cloud e perfis reproduzíveis | Manifest/hash estáveis; planner sem autoridade; fallback determinístico sem custo oculto; dossier V0.3 |
 | V0.4 | 23–24 | MCP semântico e observabilidade segura | MCP stdio isolado; traces/métricas redigidos; dossier V0.4 |
-| V0.5 | 25–26 | Benchmark de cinco tasks com hidden tests | Mesma base/budget, isolamento comprovado, raw results e dossier V0.5 |
+| V0.5 | 33–34, 25–26 | Documentação confiável, governança greenfield e benchmark de cinco tasks com hidden tests | Fontes oficiais/Context7 limitadas; profiles completos; mesma base/budget, isolamento, raw results e dossier V0.5 |
 | V1.0 | 27–28 | Recovery, idempotência, cancellation e hardening | Chaos/security matrix, upgrade/recovery e dossier V1.0 |
 | V1.1 | 29–31 | Roteamento por evidência, DAG paralela e qualificação ampliada | Decisões explicáveis, isolamento concorrente e release dossier completo |
 
@@ -435,7 +453,9 @@ O planejamento é estado versionado da Factory e nunca entra no `.gitignore`. De
 | TASK-022 | [task22.md](task22.md) | Perfis/fallback e V0.3 | 21 |
 | TASK-023 | [task23.md](task23.md) | MCP semântico isolado | 22 |
 | TASK-024 | [task24.md](task24.md) | Observabilidade segura e V0.4 | 23 |
-| TASK-025 | [task25.md](task25.md) | Harness de benchmark | 24 |
+| TASK-033 | [task33.md](task33.md) | Gateway confiável de documentação oficial | 24 |
+| TASK-034 | [task34.md](task34.md) | Governança para projetos greenfield | 33 |
+| TASK-025 | [task25.md](task25.md) | Harness de benchmark | 34 |
 | TASK-026 | [task26.md](task26.md) | Dataset/hidden tests e V0.5 | 25 |
 | TASK-027 | [task27.md](task27.md) | Recovery/idempotência | 26 |
 | TASK-028 | [task28.md](task28.md) | Cancellation/chaos e V1.0 | 27 |
@@ -455,7 +475,7 @@ flowchart LR
     T19 --> T21["21 Cloud planner"]
     T20 --> T21
     T21 --> T22["22 Profiles / V0.3"] --> T23["23 MCP"] --> T24["24 OTel / V0.4"]
-    T24 --> T25["25 Harness"] --> T26["26 Dataset / V0.5"] --> T27["27 Recovery"] --> T28["28 Chaos / V1.0"]
+    T24 --> T33["33 Trusted docs"] --> T34["34 Greenfield governance"] --> T25["25 Harness"] --> T26["26 Dataset / V0.5"] --> T27["27 Recovery"] --> T28["28 Chaos / V1.0"]
     T28 --> T29["29 Router"] --> T30["30 DAG"] --> T31["31 V1.1"]
 ```
 
@@ -469,6 +489,8 @@ flowchart LR
 | Infrastructure | Git real temporário, SQLite real temporário, subprocesso fake | Não |
 | Integration | pipeline com FakeWorkers editando worktree real | Não |
 | Security/abuse | injection, traversal/symlink, canary secret, output hostil, TOCTOU e limites | Não |
+| Documentation | precedence oficial, cache, SSRF/DNS rebinding, injection e budget | Não; fixtures nos gates |
+| Governance | golden profiles, catálogo de regras, no-overwrite e implementation gate | Não |
 | Smoke | um prompt mínimo por CLI instalado | Sim, opt-in |
 | Benchmark | tasks do `factory-lab` em base imutável | Sim, perfil controlado |
 | Chaos | kill points, timeout, DB locked, invalid JSON, quota parcial | Não |
@@ -495,6 +517,7 @@ O pipeline inclui secret scan no repositório/diff; a qualificação de release 
 - preflight bloqueia credenciais de API por consumo quando o perfil proíbe;
 - inferência de runtime é cloud-only pelos CLIs OpenCode, Codex e Claude Code; endpoint local ou self-hosted falha no preflight;
 - transporte ao provider é permitido somente ao processo do CLI em perfil live explícito; web e rede de tools continuam negados;
+- pesquisa documental usa capacidade distinta, negada por padrão, allowlist de fontes oficiais e endpoint Context7 fixo; documentos e respostas continuam não confiáveis;
 - profile live fixa provider, classificação/retention e budget; somente context view mínima e secret-scanned pode sair do host;
 - tokens de autenticação nunca são logados ou copiados para artifacts;
 - ambiente de subprocesso é allowlist;
@@ -511,6 +534,7 @@ O pipeline inclui secret scan no repositório/diff; a qualificação de release 
 - SecretGate examina apenas o diff e bloqueia `.env`, private keys e padrões de token;
 - dependências são locked, auditadas e incluídas em SBOM; suppressions têm owner, risco e expiração;
 - aprovação humana é registrada com timestamp, ator, base commit, worktree e hash do diff aprovado; mudança invalida a aprovação.
+- bootstrap greenfield usa preview por padrão, create-exclusive e publicação transacional com manifest final; qualquer regra ou conteúdo preexistente bloqueia a escrita.
 
 ## 16. Observabilidade e métricas
 
@@ -562,6 +586,9 @@ IDs de task ou run não entram como labels de métricas para evitar alta cardina
 - [ ] Repair e failover possuem budgets e métricas separados.
 - [ ] Context manifest contém razão, caminho, hash e tamanho.
 - [ ] MCP expõe tools semânticas, nunca execução arbitrária.
+- [ ] Pesquisa documental produz evidência versionada e sanitizada; claim crítica exige fonte oficial e Context7 é somente complementar.
+- [ ] Projeto greenfield recebe `AGENTS.md` e profiles aplicáveis de qualidade, segurança, FinOps, infraestrutura, banco, frontend/mobile antes de qualquer código.
+- [ ] Projeto com regras ou conteúdo preexistente não é sobrescrito pelo bootstrap.
 - [ ] Estado e eventos permitem retomar todos os kill points suportados.
 - [ ] Roteamento registra candidatos, exclusões, score e decisão.
 - [ ] Tasks independentes executam em paralelo; dependentes aguardam; a mesma task nunca tem dois writers.
@@ -592,6 +619,9 @@ IDs de task ou run não entram como labels de métricas para evitar alta cardina
 | Router reforçar dados ruins | Baseline estático preservado, feature flags e explicação por decisão |
 | Benchmark vazar hidden tests | Injeção após término do worker e armazenamento fora do worktree visível |
 | Contexto crescer sem limite | Budget determinístico, manifest e truncation policy auditável |
+| Documento externo conter injection, dado obsoleto ou URL maliciosa | Fonte oficial prioritária, Context7 complementar, allowlist, SSRF defense, schema/limites e evidence hash |
+| Bootstrap impor regra inadequada ou sobrescrever projeto | Profiles fechados, composição monotônica, preview, greenfield estrito, no-overwrite e manifest validado |
+| Projeto chegar ao launch com custo ou uso de banco ineficiente | Profile FinOps/infra pinado; budgets, unit economics, quotas e gates para N+1/conexão ou consulta em loop |
 | Paralelismo causar conflito posterior | Apenas DAG independente; sem merge automático; base commit registrado |
 
 ## 20. Fluxo de execução das tasks deste plano
@@ -631,5 +661,13 @@ Não usar estimativas de calendário sem velocidade observada. Depois da V0.1, m
 - [OpenCode — CLI](https://opencode.ai/docs/cli/)
 - [OpenCode — permissions](https://opencode.ai/docs/permissions/)
 - [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/)
+- [Context7 — repositório e tools oficiais](https://github.com/upstash/context7)
+- [Context7 — clientes suportados](https://context7.com/docs/resources/all-clients)
 - [OpenTelemetry Python](https://opentelemetry.io/docs/languages/python/)
 - [SQLite — WAL](https://sqlite.org/wal.html)
+- [W3C — WCAG 2.2](https://www.w3.org/TR/WCAG22/)
+- [Google — Web Vitals](https://web.dev/articles/vitals)
+- [Android — Core app quality guidelines](https://developer.android.com/docs/quality-guidelines/core-app-quality)
+- [Apple — Accessibility Human Interface Guidelines](https://developer.apple.com/design/human-interface-guidelines/accessibility/)
+- [OWASP Mobile Application Security Verification Standard](https://mas.owasp.org/MASVS/)
+- [FinOps Framework](https://www.finops.org/framework/)

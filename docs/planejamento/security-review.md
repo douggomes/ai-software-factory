@@ -1,8 +1,8 @@
 ---
 title: Revisão de engenharia e threat model de segurança
 status: normative
-version: "1.0"
-date: 2026-08-11
+version: "1.1"
+date: 2026-08-13
 tags:
   - ai-software-factory
   - appsec
@@ -16,7 +16,7 @@ tags:
 
 O plano original já adota controles sólidos: Core determinístico, worktree por task, um writer, gates independentes do LLM, least privilege, comandos sem shell, ambiente filtrado, redaction, budgets, circuit breaker, revisão e aprovação humana.
 
-Ele ainda não atendia integralmente às melhores práticas porque não tornava Clean Code/SOLID verificáveis e não explicitava threat model, supply chain, paths/symlinks, permissões locais, hooks Git, prompt injection, TOCTOU da aprovação nem a diferença entre processo filtrado e isolamento forte. Este documento fecha a especificação dessas lacunas e sua implementação está distribuída nas tasks.
+Ele ainda não atendia integralmente às melhores práticas porque não tornava Clean Code/SOLID verificáveis e não explicitava threat model, supply chain, paths/symlinks, permissões locais, hooks Git, prompt injection, TOCTOU da aprovação nem a diferença entre processo filtrado e isolamento forte. A pesquisa de documentação remota e a escrita de governança em projetos greenfield também introduzem novas fronteiras: fonte externa não é autoridade e conteúdo preexistente nunca pode ser sobrescrito. Este documento fecha a especificação dessas lacunas e sua implementação está distribuída nas tasks.
 
 > [!warning] Limite de confiança da V1.1
 > A V1.1 é qualificada para laboratório local, mono-tenant e repositórios confiáveis. Executar build, teste, hook ou código de um repositório arbitrário no host pode comprometer credenciais e arquivos mesmo com `env` filtrado. Repositório não confiável deve rodar em container/VM/sandbox forte, sem segredos, com rede negada por padrão e limites de recursos; sem esse perfil a Factory falha fechada.
@@ -28,7 +28,9 @@ Ele ainda não atendia integralmente às melhores práticas porque não tornava 
 - [OWASP ASVS 5.0.0](https://owasp.org/www-project-application-security-verification-standard/) como catálogo técnico aplicável, adaptado ao produto local;
 - [OWASP Top 10 for LLM Applications 2025](https://genai.owasp.org/llm-top-10/) para prompt injection, dados sensíveis, supply chain, output handling, excessive agency e consumo sem limite;
 - [OWASP Top 10 for Agentic Applications 2026](https://genai.owasp.org/resource/owasp-top-10-for-agentic-applications-for-2026/) para goal hijack, tool misuse, privilégios, execução inesperada, poisoning e falhas em cascata;
-- [OWASP SCVS](https://owasp.org/www-project-software-component-verification-standard/) para componentes e dependências.
+- [OWASP SCVS](https://owasp.org/www-project-software-component-verification-standard/) para componentes e dependências;
+- [W3C WCAG 2.2](https://www.w3.org/TR/WCAG22/) e [OWASP MASVS](https://mas.owasp.org/MASVS/) para profiles frontend/mobile;
+- [FinOps Framework](https://www.finops.org/framework/) para governança de custo, valor e accountability.
 
 O SSDF 1.2 está em draft; até publicação final, 1.1 é a baseline normativa e o draft é apenas acompanhado.
 
@@ -40,11 +42,13 @@ O SSDF 1.2 está em draft; até publicação final, 1.1 é a baseline normativa 
 - banco SQLite, events, prompts, context manifests, diffs e artifacts;
 - identidade do run, base commit, locks, decisões, aprovações e evidências;
 - disponibilidade do host, quotas, tokens, tempo e custo de providers;
-- integridade de dependências, CLIs de coding agent e ferramentas MCP.
+- integridade de dependências, CLIs de coding agent e ferramentas MCP;
+- evidências de documentação, allowlists de fontes, templates, profiles e manifests de governança;
+- regras e arquivos preexistentes no projeto alvo.
 
 ## 4. Entradas sempre não confiáveis
 
-SPEC e arquivos do repositório, nomes/paths, output de Git e subprocessos, respostas/model output de providers, JSON estruturado, argumentos e resultados MCP, métricas históricas de roteamento, pacotes de continuação e fixtures importadas são dados não confiáveis. Conteúdo do repositório nunca pode elevar-se a política da Factory.
+SPEC e arquivos do repositório, nomes/paths, output de Git e subprocessos, respostas/model output de providers, JSON estruturado, argumentos e resultados MCP, documentação remota, snippets, metadados de fonte, métricas históricas de roteamento, pacotes de continuação e fixtures importadas são dados não confiáveis. Conteúdo do repositório ou de uma documentação nunca pode elevar-se a política da Factory.
 
 ## 5. Trust boundaries
 
@@ -58,6 +62,10 @@ flowchart LR
     Tools --> Host["Host filesystem e processos"]
     Policy --> Store["SQLite + artifacts"]
     Remote["Provider remoto"] <-->|"rede e credenciais controladas"| Model
+    Docs["Docs oficiais / Context7"] -->|"conteúdo remoto não confiável"| DocGateway["Documentation Gateway"]
+    DocGateway -->|"evidência limitada + provenance"| Policy
+    Policy -->|"plano autorizado e hash"| Bootstrap["Greenfield Governance"]
+    Bootstrap -->|"create-exclusive"| Target["Projeto alvo vazio"]
 ```
 
 Toda seta é mediada por validação, autorização, limite de recursos, schema/tipo, telemetria sanitizada e política fail-closed.
@@ -82,6 +90,12 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 | Artifacts/DB adulterados | permissões locais; SHA-256; append-only events; migrations; integridade na leitura; backup/restore testado | 4–5, 8, 12, 24, 27–28 |
 | Cascata entre agentes/tasks | budgets independentes, cancellation estruturada, bulkheads, lock por task e falha localizada | 11–12, 17, 27–30 |
 | Vazamento de hidden tests | armazenamento fora do contexto/worktree; injeção somente após worker; isolamento do benchmark | 26, 31 |
+| Documento remoto malicioso, obsoleto ou ambíguo | fonte oficial versionada prioritária; Context7 complementar; schema/limite; provenance/hash; claim crítica exige fonte oficial | 33 |
+| SSRF, redirect ou DNS rebinding na pesquisa | endpoint/domínio/path allowlisted; HTTPS/443; zero redirect; IP público revalidado no uso; budget/timeout | 33 |
+| Exfiltração por query documental | request reduzido a biblioteca/versão/pergunta pública; SecretGate; código, SPEC, prompt e diff proibidos | 33 |
+| Sobrescrita ou enfraquecimento de regras do projeto | greenfield estrito; preview; merge monotônico de profiles; create-exclusive; publicação transacional; sem reconciliação automática | 34 |
+| Código gerado antes de governança válida | implementation gate bloqueado até schema, hashes, evidências e catálogo de regras passarem | 34 |
+| Custo/infra/banco ignorados na geração | profiles obrigatórios com budget, owner, unit economics, quotas, SLO e gates para N+1/conexão ou consulta em loop | 34 |
 
 ## 7. Controles de implementação
 
@@ -116,6 +130,27 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 - MCP expõe tools semânticas mínimas, autoriza novamente cada chamada e não registra tools dinamicamente a partir do modelo;
 - toda ação material é vinculada a run/task/attempt e a autoridade não é herdada de texto ou output anterior.
 
+### Documentação externa
+
+- pesquisa é uma capability própria, offline por padrão e separada da rede concedida aos CLIs de modelo;
+- fontes oficiais versionadas prevalecem; Context7 agrega descoberta/contexto e nunca sustenta sozinho segurança, billing, migration ou breaking change;
+- endpoint Context7, tools, domínios oficiais e path prefixes são allowlisted; URL arbitrária, redirect, IP literal e rede privada/link-local/loopback são negados;
+- DNS é resolvido e revalidado no momento da conexão para conter rebinding e TOCTOU;
+- query contém somente identificador público, versão e pergunta técnica genérica; SecretGate bloqueia segredo, código, SPEC, prompt e diff;
+- respostas são limitadas por tempo, bytes, itens e trechos, validadas por schema, marcadas como dados e persistidas apenas com provenance/hash;
+- cache inclui library/version/source/query/policy hashes; cache expirado não ativa rede e falha não dispara retry oculto;
+- credencial opcional permanece no adapter oficial e nunca aparece em argumento, evento, log, trace, prompt ou artifact.
+
+### Bootstrap de governança greenfield
+
+- preview é read-only; apply exige autorização vinculada ao hash do plano e revalida alvo, profiles, evidências e path;
+- alvo precisa estar vazio, dentro da raiz autorizada e sem symlink; regra, código, configuração ou histórico preexistente bloqueia apply;
+- templates e profiles são versionados, determinísticos e monotônicos: especialização pode restringir, nunca remover baseline;
+- arquivos são criados exclusivamente em staging, publicados com journal e manifest commit marker por último; falha faz rollback apenas do que o journal prova pertencer à operação;
+- `AGENTS.md` gerado é agnóstico de host e fonte normativa única; adapters de Claude, Codex ou OpenCode não duplicam política;
+- generation workers permanecem bloqueados até o validator confirmar manifest, hashes, evidence refs e catálogo mínimo;
+- alteração posterior de arquivo/hash invalida o gate; atualização de baseline oficial é explícita e nunca reescreve silenciosamente projeto existente.
+
 ### Supply chain e release
 
 - `uv.lock` é obrigatório e CI usa `uv sync --locked`/`uv lock --check`;
@@ -139,6 +174,8 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 | F-08 | permissões de DB/artifacts não estavam definidas | Média | 0700/0600, hash e integrity checks nas TASK-004/005/012 |
 | F-09 | MCP não explicitava cross-run/confused deputy | Alta | autorização por chamada e sessão isolada na TASK-023 |
 | F-10 | router histórico podia sofrer poisoning | Média | provenance, baseline, rollback e validação na TASK-029 |
+| F-11 | documentação oficial/Context7 não possuía trust boundary, SSRF defense ou provenance | Crítica | gateway fechado, evidência versionada e abuse tests na TASK-033 |
+| F-12 | projeto greenfield podia receber código sem normas de qualidade, segurança, custo ou plataforma | Alta | pacote agnóstico, profiles e implementation gate na TASK-034 |
 
 ## 9. Critérios de segurança da V1.1
 
@@ -151,7 +188,9 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 - [ ] vulnerabilities/suppressions abertas possuem owner, risco, prazo e aprovação;
 - [ ] aprovação humana corresponde exatamente a base commit e diff validados;
 - [ ] recovery/backup preserva integridade e não reexecuta efeitos já concluídos;
-- [ ] evidências demonstram os controles, não apenas a ausência de alertas.
+- [ ] evidências demonstram os controles, não apenas a ausência de alertas;
+- [ ] pesquisa documental mantém rede negada por padrão, bloqueia SSRF/exfiltração e exige fonte oficial para claims críticas;
+- [ ] bootstrap não sobrescreve projeto preexistente e bloqueia geração até governança íntegra e completa.
 
 ## 10. Risco residual aceito para V1.1
 
@@ -160,6 +199,8 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 - sandbox oferecido por provider ou macOS não é automaticamente equivalente a VM/container;
 - prompt injection não é eliminável apenas por prompting; o dano é contido por autoridade mínima e validação determinística;
 - laboratório mono-tenant não resolve requisitos de autenticação, segregação e privacidade de um serviço multiusuário;
-- modelos em nuvem podem produzir código vulnerável; gates e revisão continuam obrigatórios.
+- modelos em nuvem podem produzir código vulnerável; gates e revisão continuam obrigatórios;
+- documentação oficial, Context7 e baselines de plataforma podem mudar ou conter erro; evidência pinada não elimina revisão humana;
+- templates não substituem threat modeling específico do domínio, legislação, região, loja ou infraestrutura escolhida.
 
 Qualquer expansão para serviço remoto, múltiplos usuários, repositórios públicos arbitrários ou execução privilegiada exige novo threat model antes da implementação.
