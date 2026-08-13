@@ -21,6 +21,7 @@ from ai_software_factory.core.ids import AttemptId, RunId
 DEFAULT_TIMEOUT_SECONDS: Final[float] = 900.0
 DEFAULT_TERMINATION_GRACE_SECONDS: Final[float] = 5.0
 DEFAULT_MAX_OUTPUT_BYTES: Final[int] = 4_194_304
+DEFAULT_MAX_EXECUTABLE_BYTES: Final[int] = 268_435_456
 DEFAULT_CONTROLLED_PATH: Final[str] = "/usr/bin:/bin"
 _ENVIRONMENT_KEY_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _RESERVED_ENVIRONMENT_KEYS: Final[frozenset[str]] = frozenset(
@@ -65,7 +66,7 @@ class ProcessPolicy:
     allowed_cwd_roots: tuple[Path, ...] = ()
     environment_allowlist: frozenset[str] = frozenset()
     controlled_path: str = DEFAULT_CONTROLLED_PATH
-    isolation_available: bool = False
+    max_executable_bytes: int = DEFAULT_MAX_EXECUTABLE_BYTES
 
     def __post_init__(self) -> None:
         executables = tuple(Path(path) for path in self.allowed_executables)
@@ -76,6 +77,8 @@ class ProcessPolicy:
         object.__setattr__(self, "environment_allowlist", environment_allowlist)
         if not self.controlled_path or "\x00" in self.controlled_path:
             raise ProcessModelError("controlled_path must be a non-empty safe string")
+        if not 0 < self.max_executable_bytes <= DEFAULT_MAX_EXECUTABLE_BYTES:
+            raise ProcessModelError("executable byte limit is outside policy")
         for name in self.environment_allowlist:
             _validate_environment_key(name, allow_reserved=False)
 
@@ -105,7 +108,6 @@ class ProcessRequest:
     max_memory_bytes: int | None = None
     max_cpu_seconds: int | None = None
     trust_profile: TrustProfile = TrustProfile.TRUSTED
-    isolation_available: bool | None = None
     redaction_secrets: tuple[str, ...] = ()
     run_id: RunId | None = None
     attempt_id: AttemptId | None = None
@@ -187,7 +189,7 @@ def _normalize_request_policy(request: ProcessRequest) -> None:
             allowed_cwd_roots=request.allowed_cwd_roots or policy.allowed_cwd_roots,
             environment_allowlist=policy.environment_allowlist,
             controlled_path=policy.controlled_path,
-            isolation_available=policy.isolation_available,
+            max_executable_bytes=policy.max_executable_bytes,
         ),
     )
 

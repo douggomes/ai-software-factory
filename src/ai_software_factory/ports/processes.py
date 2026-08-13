@@ -29,7 +29,13 @@ class ProcessArtifactError(ProcessExecutionError):
 
 @runtime_checkable
 class ProcessRunner(Protocol):
-    """Execute one already-authorized process request."""
+    """Execute one already-authorized process request.
+
+    Host implementations retain stable executable bytes before spawn. Physical
+    relocation is an explicit part of this contract and is bounded by
+    ``ProcessPolicy``. Executables must receive resources by argv, environment
+    or cwd; discovery relative to their physical executable path is unsupported.
+    """
 
     async def run(self, request: ProcessRequest) -> ProcessResult:
         """Run a process and return a bounded, sanitized result."""

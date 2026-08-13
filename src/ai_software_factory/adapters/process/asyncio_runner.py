@@ -10,8 +10,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import os
-import re
 import resource
 import shutil
 import signal as signal_module
@@ -35,6 +35,11 @@ from ai_software_factory.ports.artifacts import (
     ArtifactRef,
     ArtifactStore,
 )
+from ai_software_factory.ports.output_sanitization import (
+    OutputSanitizationError,
+    OutputSanitizer,
+    OutputSanitizerFactory,
+)
 from ai_software_factory.ports.processes import (
     ProcessArtifactError,
     ProcessExecutionError,
@@ -44,129 +49,114 @@ from ai_software_factory.ports.processes import (
 )
 
 _STREAM_CHUNK_BYTES: Final[int] = 32_768
-_REDACTION_MARKER: Final[bytes] = b"<REDACTED>"
-_ASSIGNMENT_SECRET_PATTERN: Final[re.Pattern[bytes]] = re.compile(
-    rb"(?i)\b(password|passwd|secret|token|api[_-]?key)\b(\s*[:=]\s*)[^\s,;]+"
-)
 _DEFAULT_ARTIFACT_PREFIX: Final[str] = "process"
 
 
 class _StreamCapture:
     """Read one pipe to completion while keeping only bounded safe bytes."""
 
-    def __init__(self, max_bytes: int, secrets: Iterable[bytes]) -> None:
-        self._max_bytes = max_bytes
-        self._buffer = bytearray()
-        self._truncated = False
-        self._secrets = tuple(
-            sorted((secret for secret in secrets if secret), key=len, reverse=True)
-        )
-        self._pending = b""
-        self._pending_limit = max((len(secret) for secret in self._secrets), default=1) - 1
+    def __init__(self, sanitizer: OutputSanitizer) -> None:
+        self._sanitizer = sanitizer
+        self._data = b""
 
     @property
     def truncated(self) -> bool:
-        return self._truncated
+        return self._sanitizer.truncated
 
     @property
     def data(self) -> bytes:
-        return bytes(self._buffer)
+        return self._data
 
     async def read(self, stream: asyncio.StreamReader) -> None:
         while True:
             chunk = await stream.read(_STREAM_CHUNK_BYTES)
             if not chunk:
                 break
-            self._append(self._redact_incremental(chunk, final=False))
-        self._append(self._redact_incremental(b"", final=True))
-
-    def _redact_incremental(self, chunk: bytes, *, final: bool) -> bytes:
-        data = self._pending + chunk
-        redacted = _redact_bytes(data, self._secrets)
-        if final or self._pending_limit == 0:
-            self._pending = b""
-            return redacted
-        split_at = max(0, len(redacted) - self._pending_limit)
-        self._pending = redacted[split_at:]
-        return redacted[:split_at]
-
-    def _append(self, data: bytes) -> None:
-        if not data:
-            return
-        remaining = self._max_bytes - len(self._buffer)
-        if remaining <= 0:
-            self._truncated = True
-            return
-        if len(data) > remaining:
-            self._buffer.extend(data[:remaining])
-            self._truncated = True
-            return
-        self._buffer.extend(data)
+            self._sanitizer.feed(chunk)
+        self._data = self._sanitizer.finish()
 
 
 class AsyncioProcessRunner(ProcessRunner):
     """ProcessRunner implementation backed by ``asyncio`` and POSIX groups."""
 
-    def __init__(self, artifact_store: ArtifactStore | None = None) -> None:
+    def __init__(
+        self,
+        artifact_store: ArtifactStore | None = None,
+        *,
+        sanitizer_factory: OutputSanitizerFactory,
+    ) -> None:
         self._artifact_store = artifact_store
+        self._sanitizer_factory = sanitizer_factory
 
     async def run(self, request: ProcessRequest) -> ProcessResult:
         """Validate, execute and persist a bounded process result.
 
         Raises ``ProcessPolicyError`` before spawning when any path or
-        environment rule fails, and ``ProcessIsolationError`` for untrusted
-        execution without an explicit strong-isolation capability.
+        environment rule fails, and ``ProcessIsolationError`` for every
+        untrusted execution because this adapter is restricted to the host.
         ``asyncio.CancelledError`` is re-raised after the process group is
         terminated and its output readers are drained.
         """
         executable, cwd = _authorize_request(request)
-        if request.trust_profile is TrustProfile.UNTRUSTED and not _isolation_available(request):
+        if request.trust_profile is TrustProfile.UNTRUSTED:
             raise ProcessIsolationError(
                 "untrusted process execution requires approved strong isolation"
             )
         environment = _build_environment(request)
         secrets = _secret_bytes(request.environment, request.redaction_secrets)
+        try:
+            captures = (
+                _StreamCapture(self._sanitizer_factory(request.max_output_bytes, secrets)),
+                _StreamCapture(self._sanitizer_factory(request.max_output_bytes, secrets)),
+            )
+        except OutputSanitizationError as error:
+            raise ProcessArtifactError("process output policy could not be initialized") from error
         runtime_root = Path(tempfile.mkdtemp(prefix="aif-process-"))
         _secure_runtime_directories(runtime_root)
         environment.update(_runtime_environment(runtime_root))
 
         process: asyncio.subprocess.Process | None = None
-        captures: tuple[_StreamCapture, _StreamCapture] | None = None
         reader_tasks: tuple[asyncio.Task[None], asyncio.Task[None]] | None = None
         started_at = time.monotonic()
         timed_out = False
+        cwd_fd = -1
+        executable_fd = -1
         try:
+            cwd_fd = _open_directory_descriptor(cwd)
+            executable_fd = _open_executable_descriptor(executable)
+            retained_executable = _materialize_executable(
+                executable_fd,
+                runtime_root,
+                request.policy.max_executable_bytes,
+            )
+            os.close(executable_fd)
+            executable_fd = -1
             process = await asyncio.create_subprocess_exec(
                 *request.argv,
-                executable=str(executable),
-                cwd=str(cwd),
+                executable=str(retained_executable),
+                cwd=None,
                 env=environment,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
                 start_new_session=(os.name == "posix"),
-                preexec_fn=_resource_limit_initializer(request),
+                preexec_fn=_child_initializer(request, cwd_fd),
+                pass_fds=(cwd_fd,),
             )
+            os.close(cwd_fd)
+            cwd_fd = -1
             if process.stdout is None or process.stderr is None:
                 raise ProcessExecutionError("subprocess pipes were not created")
-            captures = (
-                _StreamCapture(request.max_output_bytes, secrets),
-                _StreamCapture(request.max_output_bytes, secrets),
-            )
             reader_tasks = (
                 asyncio.create_task(captures[0].read(process.stdout)),
                 asyncio.create_task(captures[1].read(process.stderr)),
             )
-            try:
-                await asyncio.wait_for(process.wait(), request.timeout_seconds)
-            except TimeoutError:
-                timed_out = True
-                await _terminate_process_group(process, request.termination_grace_seconds)
-            except asyncio.CancelledError:
-                await _terminate_process_group(process, request.termination_grace_seconds)
-                raise
-            finally:
-                await asyncio.gather(*reader_tasks, return_exceptions=False)
+            timed_out = await _wait_for_process_and_output(
+                process,
+                reader_tasks,
+                request.timeout_seconds,
+                request.termination_grace_seconds,
+            )
 
             exit_code, termination_signal = _termination_status(process.returncode)
             stdout_ref, stderr_ref = self._persist_output(request, captures)
@@ -179,7 +169,15 @@ class AsyncioProcessRunner(ProcessRunner):
                 stdout_ref=stdout_ref,
                 stderr_ref=stderr_ref,
             )
+        except OutputSanitizationError as error:
+            if process is not None:
+                await _terminate_process_group(process, request.termination_grace_seconds)
+            raise ProcessArtifactError("process output could not be sanitized") from error
         finally:
+            if cwd_fd >= 0:
+                os.close(cwd_fd)
+            if executable_fd >= 0:
+                os.close(executable_fd)
             if reader_tasks is not None and any(not task.done() for task in reader_tasks):
                 for task in reader_tasks:
                     task.cancel()
@@ -213,9 +211,48 @@ class AsyncioProcessRunner(ProcessRunner):
                 ),
                 captures[1].data,
             )
-        except (ArtifactError, OSError, ValueError) as error:
+        except (ArtifactError, OSError, OutputSanitizationError, ValueError) as error:
             raise ProcessArtifactError("sanitized process output could not be stored") from error
         return stdout.ref, stderr.ref
+
+
+async def _wait_for_process_and_output(
+    process: asyncio.subprocess.Process,
+    reader_tasks: tuple[asyncio.Task[None], asyncio.Task[None]],
+    timeout_seconds: float,
+    termination_grace_seconds: float,
+) -> bool:
+    """Terminate promptly on timeout, cancellation or sanitizer/read failure."""
+    process_task = asyncio.create_task(process.wait())
+    tasks = (process_task, *reader_tasks)
+    try:
+        done, pending = await asyncio.wait(
+            tasks,
+            timeout=timeout_seconds,
+            return_when=asyncio.FIRST_EXCEPTION,
+        )
+        failed = tuple(
+            task for task in done if not task.cancelled() and task.exception() is not None
+        )
+        if failed:
+            await _terminate_process_group(process, termination_grace_seconds)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            failed[0].result()
+            raise ProcessExecutionError("process output reader failed without an error")
+        if pending:
+            await _terminate_process_group(process, termination_grace_seconds)
+            await asyncio.gather(*tasks, return_exceptions=False)
+            return True
+        await asyncio.gather(*tasks, return_exceptions=False)
+        return False
+    except asyncio.CancelledError:
+        await _terminate_process_group(process, termination_grace_seconds)
+        await asyncio.gather(*tasks, return_exceptions=True)
+        raise
+    finally:
+        if not process_task.done():
+            process_task.cancel()
+            await asyncio.gather(process_task, return_exceptions=True)
 
 
 def _authorize_request(request: ProcessRequest) -> tuple[Path, Path]:
@@ -260,6 +297,133 @@ def _canonical_directory(path: Path, label: str) -> Path:
     return candidate
 
 
+def _open_directory_descriptor(path: Path) -> int:
+    if os.name != "posix":
+        raise ProcessPolicyError("secure cwd descriptors require POSIX")
+    flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    current_fd: int | None = None
+    try:
+        current_fd = os.open(path.anchor, flags)
+        for part in path.parts[1:]:
+            next_fd = os.open(part, flags, dir_fd=current_fd)
+            os.close(current_fd)
+            current_fd = next_fd
+        return current_fd
+    except OSError as error:
+        if current_fd is not None:
+            with contextlib.suppress(OSError):
+                os.close(current_fd)
+        raise ProcessPolicyError("cannot retain cwd identity") from error
+
+
+def _open_executable_descriptor(path: Path) -> int:
+    """Retain the exact authorized executable inode for private materialization."""
+    if os.name != "posix":
+        raise ProcessPolicyError("secure executable descriptors require POSIX")
+    flags = os.O_RDONLY | getattr(os, "O_CLOEXEC", 0) | getattr(os, "O_NOFOLLOW", 0)
+    fd = -1
+    try:
+        fd = os.open(path, flags)
+        descriptor_stat = os.fstat(fd)
+        path_stat = os.lstat(path)
+    except OSError as error:
+        if fd >= 0:
+            with contextlib.suppress(OSError):
+                os.close(fd)
+        raise ProcessPolicyError("cannot retain executable identity") from error
+    if not stat.S_ISREG(descriptor_stat.st_mode) or (
+        descriptor_stat.st_dev,
+        descriptor_stat.st_ino,
+    ) != (path_stat.st_dev, path_stat.st_ino):
+        os.close(fd)
+        raise ProcessPolicyError("executable identity changed before spawn")
+    return fd
+
+
+def _materialize_executable(
+    source_fd: int,
+    runtime_root: Path,
+    max_bytes: int,
+) -> Path:
+    """Copy the retained executable into the private per-process runtime."""
+    source_stat = os.fstat(source_fd)
+    if source_stat.st_size > max_bytes:
+        raise ProcessPolicyError("authorized executable exceeds the copy policy")
+    expected_identity = _executable_identity(source_stat)
+    expected_digest = _hash_executable(source_fd, source_stat.st_size)
+    if _executable_identity(os.fstat(source_fd)) != expected_identity:
+        raise ProcessPolicyError("authorized executable changed while hashing")
+    destination = runtime_root / "executable"
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_NOFOLLOW", 0)
+    destination_fd = -1
+    try:
+        destination_fd = os.open(destination, flags, 0o500)
+        copied_digest = _copy_executable_bytes(source_fd, destination_fd, source_stat.st_size)
+        os.fsync(destination_fd)
+    except OSError as error:
+        raise ProcessPolicyError("authorized executable could not be retained") from error
+    finally:
+        if destination_fd >= 0:
+            os.close(destination_fd)
+    if (
+        copied_digest != expected_digest
+        or _executable_identity(os.fstat(source_fd)) != expected_identity
+    ):
+        raise ProcessPolicyError("authorized executable changed while copying")
+    return destination
+
+
+def _hash_executable(source_fd: int, size: int) -> str:
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = os.read(source_fd, min(_STREAM_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise ProcessPolicyError("authorized executable changed while hashing")
+        digest.update(chunk)
+        remaining -= len(chunk)
+    if os.read(source_fd, 1):
+        raise ProcessPolicyError("authorized executable changed while hashing")
+    return digest.hexdigest()
+
+
+def _copy_executable_bytes(source_fd: int, destination_fd: int, size: int) -> str:
+    os.lseek(source_fd, 0, os.SEEK_SET)
+    digest = hashlib.sha256()
+    remaining = size
+    while remaining:
+        chunk = os.read(source_fd, min(_STREAM_CHUNK_BYTES, remaining))
+        if not chunk:
+            raise ProcessPolicyError("authorized executable changed while copying")
+        digest.update(chunk)
+        _write_all(destination_fd, chunk)
+        remaining -= len(chunk)
+    if os.read(source_fd, 1):
+        raise ProcessPolicyError("authorized executable changed while copying")
+    return digest.hexdigest()
+
+
+def _executable_identity(value: os.stat_result) -> tuple[int, int, int, int, int, int]:
+    return (
+        value.st_dev,
+        value.st_ino,
+        value.st_mode,
+        value.st_size,
+        value.st_mtime_ns,
+        value.st_ctime_ns,
+    )
+
+
+def _write_all(fd: int, data: bytes) -> None:
+    offset = 0
+    while offset < len(data):
+        written = os.write(fd, data[offset:])
+        if written <= 0:
+            raise ProcessPolicyError("authorized executable could not be retained")
+        offset += written
+
+
 def _canonical_path(path: Path, label: str) -> Path:
     if not path.is_absolute():
         raise ProcessPolicyError(f"{label} must be absolute")
@@ -284,12 +448,6 @@ def _is_within(candidate: Path, root: Path) -> bool:
     except ValueError:
         return False
     return True
-
-
-def _isolation_available(request: ProcessRequest) -> bool:
-    if request.isolation_available is not None:
-        return request.isolation_available
-    return request.policy.isolation_available
 
 
 def _build_environment(request: ProcessRequest) -> dict[str, str]:
@@ -324,13 +482,6 @@ def _secret_bytes(environment: Mapping[str, str], explicit: Iterable[str]) -> tu
     return tuple(value.encode("utf-8") for value in values if value)
 
 
-def _redact_bytes(data: bytes, secrets: tuple[bytes, ...]) -> bytes:
-    redacted = data
-    for secret in secrets:
-        redacted = redacted.replace(secret, _REDACTION_MARKER)
-    return _ASSIGNMENT_SECRET_PATTERN.sub(rb"\1\2" + _REDACTION_MARKER, redacted)
-
-
 def _termination_status(returncode: int | None) -> tuple[int | None, int | None]:
     if returncode is None:
         raise ProcessExecutionError("process ended without a return code")
@@ -343,20 +494,21 @@ async def _terminate_process_group(
     process: asyncio.subprocess.Process,
     grace_seconds: float,
 ) -> None:
-    if process.returncode is not None:
-        return
     _send_process_signal(process, signal_module.SIGTERM)
+    if os.name == "posix":
+        await asyncio.sleep(grace_seconds)
+        if _process_group_exists(process.pid):
+            _send_process_signal(process, signal_module.SIGKILL)
+        await process.wait()
+        return
     try:
         await asyncio.wait_for(process.wait(), grace_seconds)
-        return
     except TimeoutError:
         _send_process_signal(process, signal_module.SIGKILL)
         await process.wait()
 
 
 def _send_process_signal(process: asyncio.subprocess.Process, signum: int) -> None:
-    if process.returncode is not None:
-        return
     if os.name == "posix":
         try:
             os.killpg(process.pid, signum)
@@ -365,6 +517,8 @@ def _send_process_signal(process: asyncio.subprocess.Process, signum: int) -> No
         except OSError as error:
             raise ProcessExecutionError("could not signal process group") from error
     else:
+        if process.returncode is not None:
+            return
         with contextlib.suppress(ProcessLookupError):
             if signum == signal_module.SIGKILL:
                 process.kill()
@@ -372,17 +526,22 @@ def _send_process_signal(process: asyncio.subprocess.Process, signum: int) -> No
                 process.terminate()
 
 
-def _resource_limit_initializer(request: ProcessRequest) -> Callable[[], None] | None:
+def _process_group_exists(process_group_id: int) -> bool:
+    try:
+        os.killpg(process_group_id, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    return True
+
+
+def _child_initializer(request: ProcessRequest, cwd_fd: int) -> Callable[[], None] | None:
     if os.name != "posix":
-        return None
-    if (
-        request.max_processes is None
-        and request.max_memory_bytes is None
-        and request.max_cpu_seconds is None
-    ):
         return None
 
     def apply_limits() -> None:
+        os.fchdir(cwd_fd)
         if request.max_cpu_seconds is not None:
             resource.setrlimit(
                 resource.RLIMIT_CPU,
