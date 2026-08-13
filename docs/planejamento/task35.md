@@ -2,9 +2,9 @@
 title: "TASK-035 — Snapshot e evidência segura de avaliação"
 task_id: TASK-035
 release: "V0.1"
-status: planned
+status: ready
 depends_on: [TASK-032]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "3ee145836564ca56ca583e3b0878eb7c522af0a4"
 risk_level: critical
 ---
 
@@ -25,17 +25,17 @@ antes da persistência. Esta fatia não executa código não confiável.
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
-- TASK-032 e o ADR-0006 estão integrados em `dev`.
+- TASK-032 e o ADR-0006 estão integrados em `dev` pelo merge `3ee145836564ca56ca583e3b0878eb7c522af0a4`.
 - `ProcessRunner`, `ArtifactStore`, `WorkspaceManager` e seus contract tests estão aprovados.
-- O baseline é fixado somente após o merge deste contrato e de sua ativação em PR de lifecycle.
+- Baseline fixado no merge commit `3ee145836564ca56ca583e3b0878eb7c522af0a4` de `origin/dev`.
 - Fixtures Git incluem arquivo ignored, binário, symlink, canários e writer concorrente.
 
 ## Arquivos permitidos
