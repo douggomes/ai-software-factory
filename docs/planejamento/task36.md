@@ -2,7 +2,7 @@
 title: "TASK-036 — Runner OCI para gates não confiáveis"
 task_id: TASK-036
 release: "V0.1"
-status: ready
+status: done
 depends_on: [TASK-035]
 baseline_commit: "db7c306006010f6070707d7cb317cb2199253f30"
 risk_level: critical
@@ -126,10 +126,10 @@ autoriza pull em runtime.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Host runner rejeita toda execução `UNTRUSTED`; runtime ausente/remoto/incompatível, imagem mutável/ausente ou policy incompleta falha antes de código e nunca faz fallback/pull.
-- [ ] **AC-002** — Docker e Podman passam a mesma contract suite com rede none, rootfs read-only, non-root, capabilities zero, limites e somente snapshot privado montado.
-- [ ] **AC-003** — Imagem versionada é reproduzível e registrada por digest, lock, SBOM e provenance; execução usa `pull=never` e não herda proxy, token, home ou socket.
-- [ ] **AC-004** — Output/timeout/cancelamento obedecem ao contrato da TASK-035 e encerram container/filhos sem tocar worktree original ou deixar artifact bruto.
+- [x] **AC-001** — Host runner rejeita toda execução `UNTRUSTED`; runtime ausente/remoto/incompatível, imagem mutável/ausente ou policy incompleta falha antes de código e nunca faz fallback/pull.
+- [x] **AC-002** — Docker e Podman passam a mesma contract suite com rede none, rootfs read-only, non-root, capabilities zero, limites e somente snapshot privado montado.
+- [x] **AC-003** — Imagem versionada é reproduzível e registrada por digest, lock, SBOM e provenance; execução usa `pull=never` e não herda proxy, token, home ou socket.
+- [x] **AC-004** — Output/timeout/cancelamento obedecem ao contrato da TASK-035 e encerram container/filhos sem tocar worktree original ou deixar artifact bruto.
 
 ## Matriz de verificação
 
