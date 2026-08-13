@@ -6,7 +6,12 @@ from pathlib import Path
 
 import pytest
 
-from ai_software_factory.config import ConfigError, Settings
+from ai_software_factory.config import (
+    APPROVED_VALIDATION_IMAGE,
+    ConfigError,
+    IsolationSettings,
+    Settings,
+)
 
 
 def test_load_missing_file_returns_safe_defaults(tmp_path: Path) -> None:
@@ -27,11 +32,24 @@ def test_load_none_path_uses_default_config_path(
 
 def test_load_accepts_explicit_known_fields(tmp_path: Path) -> None:
     config_path = tmp_path / "factory.toml"
-    config_path.write_text("no_incremental_cost = false\nlive_probes = true\n", encoding="utf-8")
+    config_path.write_text(
+        "no_incremental_cost = false\nlive_probes = true\n"
+        "[isolation]\n"
+        'backend = "docker"\n'
+        f'image = "{APPROVED_VALIDATION_IMAGE}"\n',
+        encoding="utf-8",
+    )
 
     settings = Settings.load(config_path)
 
-    assert settings == Settings(no_incremental_cost=False, live_probes=True)
+    assert settings == Settings(
+        no_incremental_cost=False,
+        live_probes=True,
+        isolation=IsolationSettings(
+            backend="docker",
+            image=APPROVED_VALIDATION_IMAGE,
+        ),
+    )
 
 
 def test_load_rejects_unknown_field_before_any_effect(tmp_path: Path) -> None:
@@ -79,4 +97,27 @@ def test_load_raises_config_error_when_path_cannot_be_read(tmp_path: Path) -> No
     config_path.mkdir()
 
     with pytest.raises(ConfigError, match="não foi possível ler"):
+        Settings.load(config_path)
+
+
+@pytest.mark.parametrize(
+    "configuration",
+    (
+        '[isolation]\nbackend = "remote"\nimage = "registry/a@sha256:'
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n',
+        '[isolation]\nbackend = "docker"\nimage = "registry/a:latest"\n',
+        '[isolation]\nbackend = "disabled"\nimage = "registry/a@sha256:'
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n',
+        '[isolation]\nbackend = "docker"\nimage = "registry/a@sha256:'
+        '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef"\n',
+    ),
+)
+def test_load_rejects_unsafe_isolation_configuration(
+    tmp_path: Path,
+    configuration: str,
+) -> None:
+    config_path = tmp_path / "factory.toml"
+    config_path.write_text(configuration, encoding="utf-8")
+
+    with pytest.raises(ConfigError):
         Settings.load(config_path)

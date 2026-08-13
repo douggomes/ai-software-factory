@@ -18,12 +18,19 @@ import stat
 import subprocess
 import sys
 from collections.abc import Callable, Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
 from ai_software_factory import __version__
 from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
+from ai_software_factory.adapters.isolation.oci import (
+    DockerIsolationBackend,
+    OciIsolationPolicy,
+    OciIsolationRunner,
+    PodmanIsolationBackend,
+    SnapshotRootAuthorizer,
+)
 from ai_software_factory.adapters.persistence.artifact_store import (
     FilesystemArtifactStore,
     SqliteEventLogReader,
@@ -39,7 +46,8 @@ from ai_software_factory.application.queries import (
 )
 from ai_software_factory.application.spec_parser import SpecParseError, SpecParser
 from ai_software_factory.application.spec_validator import SpecValidator
-from ai_software_factory.config import ConfigError, Settings
+from ai_software_factory.config import ConfigError, IsolationSettings, Settings
+from ai_software_factory.core.evaluation_workspace import EvaluationSnapshot
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
@@ -48,6 +56,7 @@ from ai_software_factory.core.spec_models import (
 )
 from ai_software_factory.core.workspace_models import Workspace, WorkspaceSnapshot
 from ai_software_factory.ports.persistence import RunNotFoundError
+from ai_software_factory.ports.processes import IsolationBackend, ProcessRunner
 from ai_software_factory.ports.workspace import WorkspaceError
 
 #: Executable name probed for each supported worker/reviewer CLI. Presence is
@@ -56,6 +65,14 @@ PROVIDER_EXECUTABLES: Final[Mapping[str, str]] = {
     "claude": "claude",
     "codex": "codex",
     "opencode": "opencode",
+}
+_APPROVED_OCI_RUNTIMES: Final[Mapping[str, tuple[Path, ...]]] = {
+    "docker": (
+        Path("/Applications/Docker.app/Contents/Resources/bin/docker"),
+        Path("/opt/homebrew/bin/docker"),
+        Path("/usr/local/bin/docker"),
+    ),
+    "podman": (Path("/opt/homebrew/bin/podman"), Path("/usr/local/bin/podman")),
 }
 
 _VERSION_PROBE_TIMEOUT_SECONDS: Final[float] = 5.0
@@ -93,6 +110,13 @@ class DoctorProbes:
     sqlite_version: Callable[[], str]
     tool_probe: Callable[[str], ToolStatus]
     provider_probe: Callable[[str], str]
+    isolation_probe: Callable[[IsolationSettings], dict[str, str | None]] = field(
+        default=lambda settings: {
+            "status": "disabled" if settings.backend == "disabled" else "incompatible",
+            "backend": None if settings.backend == "disabled" else settings.backend,
+            "image": settings.image,
+        }
+    )
 
 
 def probe_tool(
@@ -130,17 +154,94 @@ def probe_provider(executable: str) -> str:
     return "available" if shutil.which(executable) is not None else "unavailable"
 
 
+def probe_isolation(settings: IsolationSettings) -> dict[str, str | None]:
+    """Report isolation configuration without probing, pulling or building a runtime."""
+    if settings.backend == "disabled":
+        return {"status": "disabled", "backend": None, "image": None}
+    runtime = _find_approved_oci_runtime(settings.backend)
+    return {
+        "status": "available" if runtime is not None else "incompatible",
+        "backend": settings.backend,
+        "image": settings.image,
+    }
+
+
+def build_isolation_backend(
+    settings: IsolationSettings,
+    runtime_lookup: Callable[[str], str | None] | None = None,
+) -> IsolationBackend | None:
+    """Composition-root registration for the configured local OCI backend.
+
+    A missing executable is an explicit configuration failure. The caller that
+    later receives this backend still has to acquire a fresh material
+    capability, so this function cannot turn an untrusted request into host
+    execution.
+    """
+    if settings.backend == "disabled":
+        return None
+    lookup = _find_approved_oci_runtime if runtime_lookup is None else runtime_lookup
+    runtime = lookup(settings.backend)
+    if runtime is None or settings.image is None:
+        raise ConfigError("runtime OCI configurado não está disponível")
+    policy = OciIsolationPolicy(
+        backend=settings.backend,
+        image=settings.image,
+        runtime=Path(runtime).resolve(strict=True),
+    )
+    registry: Mapping[str, type[IsolationBackend]] = {
+        "docker": DockerIsolationBackend,
+        "podman": PodmanIsolationBackend,
+    }
+    return registry[settings.backend](policy)
+
+
+def build_validation_process_runner(
+    settings: IsolationSettings,
+    snapshot: EvaluationSnapshot,
+    host_runner: ProcessRunner,
+    runtime_lookup: Callable[[str], str | None] | None = None,
+) -> ProcessRunner:
+    """Compose the OCI adapter around host orchestration for one verified snapshot.
+
+    There is deliberately no host fallback: a disabled or incompatible
+    isolation configuration returns a runner that continues to reject every
+    untrusted request. The caller can use this composition only after TASK-035
+    supplied its verified snapshot capability.
+    """
+    backend = build_isolation_backend(settings, runtime_lookup)
+    if backend is None:
+        return host_runner
+    return OciIsolationRunner(host_runner, backend, SnapshotRootAuthorizer(snapshot))
+
+
+def _find_approved_oci_runtime(backend: str) -> str | None:
+    """Find only a canonical runtime installed at an approved local location."""
+    for candidate in _APPROVED_OCI_RUNTIMES.get(backend, ()):
+        try:
+            resolved = candidate.resolve(strict=True)
+        except OSError:
+            continue
+        if resolved == candidate and resolved.is_file() and os.access(resolved, os.X_OK):
+            return str(resolved)
+    return None
+
+
 def default_probes() -> DoctorProbes:
     return DoctorProbes(
         python_version=lambda: sys.version.split()[0],
         sqlite_version=lambda: sqlite3.sqlite_version,
         tool_probe=probe_tool,
         provider_probe=probe_provider,
+        isolation_probe=probe_isolation,
     )
 
 
-def build_doctor_report(probes: DoctorProbes) -> dict[str, object]:
+def build_doctor_report(
+    probes: DoctorProbes,
+    settings: IsolationSettings | None = None,
+) -> dict[str, object]:
     """Assemble the deterministic diagnostic report from injected probes."""
+    isolation = settings if settings is not None else IsolationSettings()
     uv_status = probes.tool_probe("uv")
     git_status = probes.tool_probe("git")
     return {
@@ -152,6 +253,7 @@ def build_doctor_report(probes: DoctorProbes) -> dict[str, object]:
             name: probes.provider_probe(executable)
             for name, executable in sorted(PROVIDER_EXECUTABLES.items())
         },
+        "isolation": probes.isolation_probe(isolation),
     }
 
 
@@ -543,10 +645,10 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def _dispatch(args: argparse.Namespace, factory_home: Path) -> int | None:
+def _dispatch(args: argparse.Namespace, factory_home: Path, settings: Settings) -> int | None:
     result: int | None = None
     if args.command == "doctor":
-        report = build_doctor_report(default_probes())
+        report = build_doctor_report(default_probes(), settings.isolation)
         print(json.dumps(report, indent=2, sort_keys=True))
         result = 0
     elif args.command == "spec":
@@ -566,12 +668,12 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
-        Settings.load(None)
+        settings = Settings.load(None)
     except ConfigError as error:
         print(f"error: {error}", file=sys.stderr)
         return _EXIT_INVALID
     factory_home = resolve_factory_home()
-    result = _dispatch(args, factory_home)
+    result = _dispatch(args, factory_home, settings)
     if result is not None:
         return result
     if args.command == "spec":
