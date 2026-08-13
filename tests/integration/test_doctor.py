@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from ai_software_factory import cli
+from ai_software_factory.config import APPROVED_VALIDATION_IMAGE, ConfigError, IsolationSettings
 
 
 def _fake_tool_probe(executable: str) -> cli.ToolStatus:
@@ -61,6 +62,7 @@ def test_doctor_offline_never_invokes_provider(
             "codex": "unavailable",
             "opencode": "unavailable",
         },
+        "isolation": {"status": "disabled", "backend": None, "image": None},
     }
 
 
@@ -92,6 +94,7 @@ def test_doctor_reports_missing_tool_as_unavailable(
         "codex": "unavailable",
         "opencode": "unavailable",
     }
+    assert report["isolation"] == {"status": "disabled", "backend": None, "image": None}
 
 
 def test_doctor_requires_json_flag() -> None:
@@ -122,6 +125,50 @@ def test_doctor_fails_fast_on_invalid_config(
     assert exit_code == expected_invalid_exit_code
     assert probed is False
     assert "campo_inexistente" in capsys.readouterr().err
+
+
+def test_doctor_reports_configured_isolation_without_invoking_runtime(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+) -> None:
+    runtime = tmp_path / "docker"
+    marker = tmp_path / "runtime-invoked"
+    _make_executable(runtime, f"#!/bin/sh\ntouch {marker}\n")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("PATH", str(tmp_path))
+    (tmp_path / "factory.toml").write_text(
+        f'[isolation]\nbackend = "docker"\nimage = "{APPROVED_VALIDATION_IMAGE}"\n',
+        encoding="utf-8",
+    )
+
+    exit_code = cli.main(["doctor", "--json"])
+
+    assert exit_code == 0
+    assert not marker.exists()
+    report = json.loads(capsys.readouterr().out)
+    assert report["isolation"] == {
+        "status": "available",
+        "backend": "docker",
+        "image": APPROVED_VALIDATION_IMAGE,
+    }
+
+
+def test_composition_root_registers_only_configured_local_backend(tmp_path: Path) -> None:
+    runtime = tmp_path / "podman"
+    _make_executable(runtime, "#!/bin/sh\nexit 0\n")
+    image = APPROVED_VALIDATION_IMAGE
+
+    assert cli.build_isolation_backend(IsolationSettings()) is None
+    backend = cli.build_isolation_backend(
+        IsolationSettings(backend="podman", image=image),
+        lambda name: str(runtime) if name == "podman" else None,
+    )
+    assert backend is not None
+    with pytest.raises(ConfigError):
+        cli.build_isolation_backend(
+            IsolationSettings(backend="podman", image=image), lambda _: None
+        )
 
 
 def test_main_without_command_prints_help_and_returns_failure(
