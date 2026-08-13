@@ -184,6 +184,7 @@ class RepositoryEvidence:
     binary_paths: tuple[str, ...]
     secret_findings: tuple[SecretFinding, ...]
     diff_hash: str
+    diff_check_failed: bool = False
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -202,6 +203,8 @@ class RepositoryEvidence:
         findings = tuple(self.secret_findings)
         object.__setattr__(self, "secret_findings", findings)
         _validate_sha256(self.diff_hash, "diff hash")
+        if type(self.diff_check_failed) is not bool:
+            raise EvaluationModelError("diff check result must be boolean")
 
 
 @dataclass(frozen=True, slots=True)

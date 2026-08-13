@@ -63,6 +63,10 @@ class EvaluationWorkspace(Protocol):
         """Capture one immutable snapshot or fail before publishing it."""
         ...
 
+    async def verify_source_current(self, snapshot: EvaluationSnapshot) -> None:
+        """Fail when the authorized source no longer matches ``snapshot``."""
+        ...
+
 
 @runtime_checkable
 class RepositoryInspection(Protocol):

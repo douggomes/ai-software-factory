@@ -10,19 +10,24 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import hashlib
 import json
 import os
+import selectors
 import shutil
+import signal
 import sqlite3
 import stat
 import subprocess
 import sys
+import time
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Final
 
 from ai_software_factory import __version__
+from ai_software_factory.adapters.git.evaluation_workspace import GitEvaluationWorkspace
 from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
 from ai_software_factory.adapters.isolation.oci import (
     DockerIsolationBackend,
@@ -47,16 +52,40 @@ from ai_software_factory.application.queries import (
 from ai_software_factory.application.spec_parser import SpecParseError, SpecParser
 from ai_software_factory.application.spec_validator import SpecValidator
 from ai_software_factory.config import ConfigError, IsolationSettings, Settings
-from ai_software_factory.core.evaluation_workspace import EvaluationSnapshot
+from ai_software_factory.core.evaluation_workspace import (
+    EvaluationCaptureRequest,
+    EvaluationSnapshot,
+)
 from ai_software_factory.core.ids import RunId, TaskId
+from ai_software_factory.core.models import TaskExecution
+from ai_software_factory.core.process_models import ProcessPolicy, ProcessRequest, ProcessResult
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
     ValidationReport,
     canonical_json,
 )
-from ai_software_factory.core.workspace_models import Workspace, WorkspaceSnapshot
+from ai_software_factory.core.workspace_models import Workspace, WorkspaceRequest, WorkspaceSnapshot
+from ai_software_factory.evaluation.models import resolve_profile
+from ai_software_factory.evaluation.runner import Evaluator
+from ai_software_factory.ports.artifacts import (
+    ArtifactError,
+    ArtifactKind,
+    ArtifactNotFoundError,
+    ArtifactRef,
+)
+from ai_software_factory.ports.evaluation_workspace import EvaluationWorkspaceError
 from ai_software_factory.ports.persistence import RunNotFoundError
-from ai_software_factory.ports.processes import IsolationBackend, ProcessRunner
+from ai_software_factory.ports.processes import (
+    IsolationBackend,
+    ProcessIsolationError,
+    ProcessRunner,
+)
+from ai_software_factory.ports.validation import (
+    GateContext,
+    GateStatus,
+    ValidationError,
+    ValidationSnapshot,
+)
 from ai_software_factory.ports.workspace import WorkspaceError
 
 #: Executable name probed for each supported worker/reviewer CLI. Presence is
@@ -88,6 +117,30 @@ _LOCK_DIR_NAME: Final[str] = "locks"
 _GIT_HOOKS_CONFIG: Final[str] = "core.hooksPath=/dev/null"
 _GIT_INSPECT_TIMEOUT_SECONDS: Final[float] = 5.0
 _MAX_WORKSPACE_DISCOVERY_ENTRIES: Final[int] = 256
+_MAX_VALIDATION_FILES: Final[int] = 4096
+_MAX_VALIDATION_FILE_BYTES: Final[int] = 8_388_608
+_MAX_VALIDATION_TOTAL_BYTES: Final[int] = 67_108_864
+_MAX_GIT_OUTPUT_BYTES: Final[int] = 8_388_608
+_GIT_READ_CHUNK_BYTES: Final[int] = 32_768
+_WORKTREE_IDENTITY_PARTS: Final[int] = 3
+_EMPTY_SHA256: Final[str] = hashlib.sha256(b"").hexdigest()
+_CREDENTIAL_PATHSPECS: Final[tuple[str, ...]] = (
+    ".env",
+    ".env.*",
+    "auth.json",
+    "id_rsa",
+    "id_ed25519",
+    ":(glob)**/.env",
+    ":(glob)**/.env.*",
+    ":(glob)**/auth.json",
+    ":(glob)**/id_rsa",
+    ":(glob)**/id_ed25519",
+)
+#: Well-known relative path for the SPEC artifact persisted for a run. Any
+#: caller that creates a ``Run`` (a future ``aif run`` command) is expected
+#: to persist the parsed SPEC under this path so ``aif validate`` can derive
+#: a task's independent allowed-path scope without trusting worker output.
+_SPEC_ARTIFACT_RELATIVE_PATH: Final[str] = "spec.md"
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,12 +208,10 @@ def probe_provider(executable: str) -> str:
 
 
 def probe_isolation(settings: IsolationSettings) -> dict[str, str | None]:
-    """Report isolation configuration without probing, pulling or building a runtime."""
     if settings.backend == "disabled":
         return {"status": "disabled", "backend": None, "image": None}
-    runtime = _find_approved_oci_runtime(settings.backend)
     return {
-        "status": "available" if runtime is not None else "incompatible",
+        "status": "available" if _find_approved_oci_runtime(settings.backend) else "incompatible",
         "backend": settings.backend,
         "image": settings.image,
     }
@@ -170,23 +221,13 @@ def build_isolation_backend(
     settings: IsolationSettings,
     runtime_lookup: Callable[[str], str | None] | None = None,
 ) -> IsolationBackend | None:
-    """Composition-root registration for the configured local OCI backend.
-
-    A missing executable is an explicit configuration failure. The caller that
-    later receives this backend still has to acquire a fresh material
-    capability, so this function cannot turn an untrusted request into host
-    execution.
-    """
     if settings.backend == "disabled":
         return None
-    lookup = _find_approved_oci_runtime if runtime_lookup is None else runtime_lookup
-    runtime = lookup(settings.backend)
+    runtime = (runtime_lookup or _find_approved_oci_runtime)(settings.backend)
     if runtime is None or settings.image is None:
         raise ConfigError("runtime OCI configurado não está disponível")
     policy = OciIsolationPolicy(
-        backend=settings.backend,
-        image=settings.image,
-        runtime=Path(runtime).resolve(strict=True),
+        settings.backend, settings.image, Path(runtime).resolve(strict=True)
     )
     registry: Mapping[str, type[IsolationBackend]] = {
         "docker": DockerIsolationBackend,
@@ -199,23 +240,66 @@ def build_validation_process_runner(
     settings: IsolationSettings,
     snapshot: EvaluationSnapshot,
     host_runner: ProcessRunner,
-    runtime_lookup: Callable[[str], str | None] | None = None,
 ) -> ProcessRunner:
-    """Compose the OCI adapter around host orchestration for one verified snapshot.
+    backend = build_isolation_backend(settings)
+    return (
+        host_runner
+        if backend is None
+        else OciIsolationRunner(host_runner, backend, SnapshotRootAuthorizer(snapshot))
+    )
 
-    There is deliberately no host fallback: a disabled or incompatible
-    isolation configuration returns a runner that continues to reject every
-    untrusted request. The caller can use this composition only after TASK-035
-    supplied its verified snapshot capability.
-    """
-    backend = build_isolation_backend(settings, runtime_lookup)
-    if backend is None:
-        return host_runner
-    return OciIsolationRunner(host_runner, backend, SnapshotRootAuthorizer(snapshot))
+
+@dataclass(frozen=True, slots=True)
+class _ValidationIsolationEvidence:
+    """Non-secret OCI policy proof bound to one validation snapshot."""
+
+    backend: str
+    policy_hash: str
+
+
+class _AuthorizedValidationOciRunner(ProcessRunner):
+    """Restrict the OCI adapter to the closed registered validation argv set."""
+
+    def __init__(
+        self,
+        delegate: ProcessRunner,
+        snapshot: EvaluationSnapshot,
+        allowed_argv: frozenset[tuple[str, ...]],
+        expected_policy: ProcessPolicy,
+    ) -> None:
+        self._delegate = delegate
+        self._snapshot = snapshot
+        self._allowed_argv = allowed_argv
+        self._expected_policy = expected_policy
+
+    async def run(self, request: ProcessRequest) -> ProcessResult:
+        if (
+            request.trust_profile.value != "untrusted"
+            or request.cwd != self._snapshot.root
+            or request.argv not in self._allowed_argv
+            or request.argv[0] != "uv"
+            or request.environment
+            or request.policy != self._expected_policy
+        ):
+            raise ProcessIsolationError("validation command is outside the authorized OCI profile")
+        return await self._delegate.run(request)
+
+
+def _validation_isolation_evidence(
+    settings: IsolationSettings,
+) -> _ValidationIsolationEvidence | None:
+    if settings.backend == "disabled":
+        return None
+    if settings.image is None:
+        raise ConfigError("isolamento OCI configurado não contém imagem aprovada")
+    runtime = _find_approved_oci_runtime(settings.backend)
+    if runtime is None:
+        raise ConfigError("runtime OCI configurado não está disponível")
+    policy = OciIsolationPolicy(settings.backend, settings.image, Path(runtime))
+    return _ValidationIsolationEvidence(settings.backend, policy.policy_hash)
 
 
 def _find_approved_oci_runtime(backend: str) -> str | None:
-    """Find only a canonical runtime installed at an approved local location."""
     for candidate in _APPROVED_OCI_RUNTIMES.get(backend, ()):
         try:
             resolved = candidate.resolve(strict=True)
@@ -237,8 +321,7 @@ def default_probes() -> DoctorProbes:
 
 
 def build_doctor_report(
-    probes: DoctorProbes,
-    settings: IsolationSettings | None = None,
+    probes: DoctorProbes, settings: IsolationSettings | None = None
 ) -> dict[str, object]:
     """Assemble the deterministic diagnostic report from injected probes."""
     isolation = settings if settings is not None else IsolationSettings()
@@ -432,10 +515,7 @@ def _run_workspace_inspect_command(run_id_raw: str, *, factory_home: Path) -> in
             return _EXIT_NOT_FOUND
         artifact_store = FilesystemArtifactStore(factory_home)
         manager = GitWorktreeManager(
-            AsyncioProcessRunner(
-                artifact_store,
-                sanitizer_factory=StreamingOutputSanitizer,
-            ),
+            AsyncioProcessRunner(artifact_store, sanitizer_factory=StreamingOutputSanitizer),
             artifact_store,
             git_executable,
         )
@@ -517,6 +597,329 @@ def _resolve_git_executable() -> Path:
     return Path(executable).resolve(strict=True)
 
 
+def _resolve_uv_executable() -> Path:
+    executable = shutil.which("uv")
+    if executable is None:
+        raise WorkspaceError("uv executable is unavailable")
+    return Path(executable).resolve(strict=True)
+
+
+class ValidationTaskSelectionError(ValueError):
+    """Raised when ``aif validate`` cannot unambiguously select a task execution."""
+
+
+@dataclass(frozen=True, slots=True)
+class _TaskValidationConfig:
+    allowed_paths: tuple[str, ...]
+    validation_commands: tuple[tuple[str, ...], ...]
+
+
+def _select_task_execution(task_executions: tuple[TaskExecution, ...]) -> TaskExecution:
+    if len(task_executions) != 1:
+        raise ValidationTaskSelectionError(
+            f"aif validate requires exactly one task execution, found {len(task_executions)}"
+        )
+    return task_executions[0]
+
+
+def _load_task_validation_config(
+    artifact_store: FilesystemArtifactStore, run_id: RunId, task_id: TaskId
+) -> _TaskValidationConfig:
+    ref = ArtifactRef(
+        run_id=run_id,
+        relative_path=_SPEC_ARTIFACT_RELATIVE_PATH,
+        kind=ArtifactKind.SPEC,
+    )
+    try:
+        raw = artifact_store.read(ref)
+    except ArtifactNotFoundError as error:
+        raise ValidationTaskSelectionError(
+            f"no SPEC artifact persisted for {run_id.value}"
+        ) from error
+    try:
+        spec = SpecParser().parse(raw.decode("utf-8"))
+    except (UnicodeDecodeError, SpecParseError) as error:
+        raise ValidationTaskSelectionError("persisted SPEC artifact is invalid") from error
+    report = SpecValidator().validate(spec, task_id=task_id.value)
+    if not report.valid:
+        raise ValidationTaskSelectionError("persisted SPEC artifact failed validation")
+    for task in spec.tasks:
+        if task.task_id.value == task_id.value:
+            return _TaskValidationConfig(
+                allowed_paths=task.allowed_paths,
+                validation_commands=tuple(command.args for command in task.validation_commands),
+            )
+    raise ValidationTaskSelectionError(f"SPEC does not define task {task_id.value}")
+
+
+@dataclass(frozen=True, slots=True)
+class _ValidateEnvironment:
+    """Resolved, host-specific inputs the composition root supplies to validate."""
+
+    db_path: Path
+    factory_home: Path
+    git_executable: Path
+    uv_executable: Path
+    isolation: IsolationSettings
+
+
+async def _run_validate_async(
+    run_id: RunId, profile_name: str, environment: _ValidateEnvironment
+) -> ValidationSnapshot:
+    store = await SQLiteRunStore.create(environment.db_path)
+    try:
+        run_snapshot = await store.load_run(run_id)
+        task_execution = _select_task_execution(run_snapshot.task_executions)
+        artifact_store = FilesystemArtifactStore(environment.factory_home)
+        task_config = _load_task_validation_config(artifact_store, run_id, task_execution.task_id)
+        worktree_path = _validated_worktree_path(
+            environment.factory_home,
+            run_id,
+            task_execution,
+            environment.git_executable,
+        )
+        host_runner = AsyncioProcessRunner(
+            artifact_store, sanitizer_factory=StreamingOutputSanitizer
+        )
+
+        repository = _validation_repository(environment.git_executable, worktree_path)
+        workspace_manager = GitWorktreeManager(
+            host_runner, artifact_store, environment.git_executable
+        )
+        try:
+            workspace = await workspace_manager.prepare(
+                WorkspaceRequest(
+                    repository=repository,
+                    factory_home=environment.factory_home,
+                    run_id=run_id,
+                    task_id=task_execution.task_id,
+                    base_commit=task_execution.base_commit,
+                )
+            )
+            if workspace.worktree_path != worktree_path:
+                raise WorkspaceError("validation workspace identity does not match persisted path")
+            evaluation_workspace = GitEvaluationWorkspace(
+                host_runner,
+                artifact_store,
+                environment.git_executable,
+                workspace_manager,
+            )
+            evaluation_snapshot = await evaluation_workspace.capture(
+                EvaluationCaptureRequest(workspace)
+            )
+            context = _context_from_evaluation_snapshot(
+                evaluation_snapshot,
+                task_config.allowed_paths,
+            )
+            process_policy = ProcessPolicy(
+                allowed_executables=(environment.uv_executable,),
+                allowed_cwd_roots=(evaluation_snapshot.root,),
+            )
+            isolation_evidence = _validation_isolation_evidence(environment.isolation)
+            allowed_argv = frozenset(
+                ("uv", "run", "--offline", *command[2:])
+                for command in task_config.validation_commands
+            )
+            process_runner = _AuthorizedValidationOciRunner(
+                build_validation_process_runner(
+                    environment.isolation, evaluation_snapshot, host_runner
+                ),
+                evaluation_snapshot,
+                allowed_argv,
+                process_policy,
+            )
+            context = _with_isolation_evidence(context, isolation_evidence)
+
+            async def source_is_current() -> bool:
+                try:
+                    await evaluation_workspace.verify_source_current(evaluation_snapshot)
+                except EvaluationWorkspaceError:
+                    return False
+                return True
+
+            profile = resolve_profile(
+                profile_name,
+                uv_executable=environment.uv_executable,
+                process_runner=process_runner,
+                process_policy=process_policy,
+                validation_commands=task_config.validation_commands,
+            )
+
+            evaluator = Evaluator(
+                context,
+                artifact_store,
+                source_verifier=source_is_current,
+            )
+            return await evaluator.run(profile)
+        finally:
+            workspace_manager.close()
+    finally:
+        await store.close()
+
+
+def _validation_repository(git_executable: Path, worktree_path: Path) -> Path:
+    """Resolve the canonical primary repository for one managed worktree."""
+    common_directory = Path(
+        _git_output(
+            git_executable,
+            worktree_path,
+            ("rev-parse", "--path-format=absolute", "--git-common-dir"),
+            label="validation Git common directory",
+        )
+    )
+    repository = _canonical_cli_directory(common_directory.parent, "validation repository")
+    top_level = _git_output(
+        git_executable,
+        repository,
+        ("rev-parse", "--show-toplevel"),
+        label="validation repository root",
+    )
+    if _canonical_cli_directory(Path(top_level), "validation repository root") != repository:
+        raise WorkspaceError("validation repository is not the managed primary worktree")
+    return repository
+
+
+def _context_from_evaluation_snapshot(
+    snapshot: EvaluationSnapshot,
+    allowed_paths: tuple[str, ...],
+) -> GateContext:
+    """Translate one verified adapter result into immutable gate facts."""
+    return GateContext(
+        run_id=snapshot.workspace.run_id,
+        task_id=snapshot.workspace.task_id,
+        worktree_path=snapshot.root,
+        base_commit=snapshot.workspace.base_commit,
+        allowed_paths=allowed_paths,
+        changed_files=snapshot.evidence.changed_paths,
+        changed_file_evidence=(),
+        diff_text="",
+        diff_check_output="",
+        evaluation_snapshot_id=snapshot.snapshot_id,
+        evaluation_manifest_hash=snapshot.manifest_hash,
+        evaluation_identity_hash=snapshot.identity_hash,
+        repository_evidence=snapshot.evidence,
+    )
+
+
+def _with_isolation_evidence(
+    context: GateContext, evidence: _ValidationIsolationEvidence | None
+) -> GateContext:
+    """Attach the configured OCI policy proof without exposing capability tokens."""
+    return GateContext(
+        run_id=context.run_id,
+        task_id=context.task_id,
+        worktree_path=context.worktree_path,
+        base_commit=context.base_commit,
+        allowed_paths=context.allowed_paths,
+        changed_files=context.changed_files,
+        changed_file_evidence=context.changed_file_evidence,
+        diff_text=context.diff_text,
+        diff_check_output=context.diff_check_output,
+        evaluation_snapshot_id=context.evaluation_snapshot_id,
+        evaluation_manifest_hash=context.evaluation_manifest_hash,
+        evaluation_identity_hash=context.evaluation_identity_hash,
+        isolation_backend=None if evidence is None else evidence.backend,
+        isolation_policy_hash=None if evidence is None else evidence.policy_hash,
+        repository_evidence=context.repository_evidence,
+    )
+
+
+def _validated_worktree_path(
+    factory_home: Path,
+    run_id: RunId,
+    task_execution: TaskExecution,
+    git_executable: Path,
+) -> Path:
+    worktree_path = _canonical_cli_directory(
+        Path(task_execution.worktree_path), "validation worktree"
+    )
+    root = _canonical_cli_directory(factory_home, "factory home") / _WORKTREE_DIR_NAME
+    try:
+        relative = worktree_path.relative_to(root)
+    except ValueError as error:
+        raise WorkspaceError("validation worktree escapes factory home") from error
+    if (
+        len(relative.parts) != _WORKTREE_IDENTITY_PARTS
+        or relative.parts[1] != run_id.value
+        or relative.parts[2] != task_execution.task_id.value
+    ):
+        raise WorkspaceError("validation worktree identity does not match run/task")
+    top_level = _git_output(
+        git_executable,
+        worktree_path,
+        ("rev-parse", "--show-toplevel"),
+        label="validation worktree root",
+    )
+    if Path(top_level).resolve(strict=True) != worktree_path:
+        raise WorkspaceError("validation worktree Git root does not match persisted path")
+    base = _git_output(
+        git_executable,
+        worktree_path,
+        ("rev-parse", "--verify", "--end-of-options", f"{task_execution.base_commit}^{{commit}}"),
+        label="validation base commit",
+    )
+    if base != task_execution.base_commit:
+        raise WorkspaceError("validation base commit does not resolve exactly")
+    ancestry = _run_controlled_git(
+        git_executable,
+        worktree_path,
+        ("merge-base", "--is-ancestor", task_execution.base_commit, "HEAD"),
+    )
+    if ancestry.returncode != 0:
+        raise WorkspaceError("validation worktree HEAD does not descend from base commit")
+    return worktree_path
+
+
+def _snapshot_summary(snapshot: ValidationSnapshot) -> dict[str, object]:
+    return {
+        "snapshot_id": snapshot.snapshot_id.value,
+        "status": snapshot.status.name,
+        "diff_hash": snapshot.diff_hash,
+        "gates": [
+            {"name": result.gate_name, "status": result.status.name}
+            for result in snapshot.gate_results
+        ],
+    }
+
+
+def _run_validate_command(
+    run_id_raw: str,
+    profile_name: str,
+    *,
+    factory_home: Path,
+    settings: Settings,
+) -> int:
+    try:
+        run_id = _parse_run_id(run_id_raw)
+        db_path = resolve_state_db(factory_home)
+        if not db_path.exists():
+            print(f"error: state database not found at {db_path}", file=sys.stderr)
+            return _EXIT_NOT_FOUND
+        environment = _ValidateEnvironment(
+            db_path=db_path,
+            factory_home=factory_home,
+            git_executable=_resolve_git_executable(),
+            uv_executable=_resolve_uv_executable(),
+            isolation=settings.isolation,
+        )
+        snapshot = asyncio.run(_run_validate_async(run_id, profile_name, environment))
+    except RunNotFoundError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_NOT_FOUND
+    except (
+        ArtifactError,
+        EvaluationWorkspaceError,
+        ValidationError,
+        ValueError,
+        WorkspaceError,
+        OSError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    print(json.dumps(_snapshot_summary(snapshot), indent=2, sort_keys=True))
+    return _EXIT_VALID if snapshot.status is GateStatus.PASSED else _EXIT_INVALID
+
+
 def _discover_workspace_paths(factory_home: Path, run_id: RunId) -> tuple[Path, ...]:
     root = _canonical_cli_directory(factory_home, "factory home") / _WORKTREE_DIR_NAME
     if not root.exists():
@@ -576,33 +979,100 @@ def _parse_task_id(raw: str) -> TaskId:
     return TaskId(raw)
 
 
-def _read_only_git(executable: Path, cwd: Path, args: tuple[str, ...]) -> str:
-    completed = subprocess.run(  # noqa: S603 - fixed Git executable and argv, no shell
-        [
-            str(executable),
-            "-c",
-            _GIT_HOOKS_CONFIG,
-            *args,
-        ],
+def _run_controlled_git(
+    executable: Path, cwd: Path, args: tuple[str, ...]
+) -> subprocess.CompletedProcess[str]:
+    argv = [str(executable), "-c", _GIT_HOOKS_CONFIG, *args]
+    process = subprocess.Popen(  # noqa: S603 - fixed Git executable and argv, no shell
+        argv,
         cwd=cwd,
         env={
             "GIT_CONFIG_GLOBAL": os.devnull,
             "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_PAGER": "cat",
             "HOME": str(cwd),
             "PATH": "/usr/bin:/bin",
         },
-        capture_output=True,
-        text=True,
-        timeout=_GIT_INSPECT_TIMEOUT_SECONDS,
-        check=False,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
         shell=False,
+        start_new_session=True,
     )
+    if process.stdout is None:
+        _terminate_git_process(process)
+        raise WorkspaceError("Git inspection pipe was not created")
+    output = bytearray()
+    deadline = time.monotonic() + _GIT_INSPECT_TIMEOUT_SECONDS
+    selector = selectors.DefaultSelector()
+    selector.register(process.stdout, selectors.EVENT_READ)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                _terminate_git_process(process)
+                raise WorkspaceError("Git inspection timed out")
+            events = selector.select(min(remaining, 0.1))
+            if not events:
+                if process.poll() is not None:
+                    break
+                continue
+            chunk = os.read(process.stdout.fileno(), _GIT_READ_CHUNK_BYTES)
+            if not chunk:
+                break
+            output.extend(chunk)
+            if len(output) > _MAX_GIT_OUTPUT_BYTES:
+                _terminate_git_process(process)
+                raise WorkspaceError("Git inspection output limit exceeded")
+        returncode = process.wait(timeout=max(0.1, deadline - time.monotonic()))
+    except subprocess.TimeoutExpired as error:
+        _terminate_git_process(process)
+        raise WorkspaceError("Git inspection timed out") from error
+    finally:
+        selector.close()
+        process.stdout.close()
+    return subprocess.CompletedProcess(
+        argv,
+        returncode,
+        output.decode("utf-8", errors="replace"),
+        "",
+    )
+
+
+def _terminate_git_process(process: subprocess.Popen[bytes]) -> None:
+    try:
+        os.killpg(process.pid, signal.SIGKILL)
+    except OSError:
+        if process.poll() is None:
+            process.kill()
+    if process.poll() is not None:
+        return
+    try:
+        process.wait(timeout=1)
+    except subprocess.TimeoutExpired:
+        process.kill()
+
+
+def _read_only_git(executable: Path, cwd: Path, args: tuple[str, ...]) -> str:
+    completed = _run_controlled_git(executable, cwd, args)
     if completed.returncode != 0:
         raise WorkspaceError(f"Git inspection failed: {args[0]}")
     value = completed.stdout.strip()
     if not value:
         raise WorkspaceError(f"Git inspection returned empty output: {args[0]}")
     return value
+
+
+def _git_output(
+    executable: Path,
+    cwd: Path,
+    args: tuple[str, ...],
+    *,
+    label: str,
+) -> str:
+    completed = _run_controlled_git(executable, cwd, args)
+    if completed.returncode != 0:
+        raise WorkspaceError(f"Git inspection failed: {label}")
+    return completed.stdout.rstrip("\n")
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -642,6 +1112,14 @@ def build_parser() -> argparse.ArgumentParser:
     inspect = workspace_sub.add_parser("inspect", help="Inspect workspaces for one run")
     inspect.add_argument("run_id", type=str, help="Run identifier (run-xxxxxxxxxxxx)")
 
+    validate = subcommands.add_parser(
+        "validate", help="Run deterministic validation gates and persist a snapshot"
+    )
+    validate.add_argument("run_id", type=str, help="Run identifier (run-xxxxxxxxxxxx)")
+    validate.add_argument(
+        "--profile", type=str, required=True, help="Registered validation profile name"
+    )
+
     return parser
 
 
@@ -661,6 +1139,13 @@ def _dispatch(args: argparse.Namespace, factory_home: Path, settings: Settings) 
     elif args.command == "workspace":
         if args.workspace_command == "inspect":
             result = _run_workspace_inspect_command(args.run_id, factory_home=factory_home)
+    elif args.command == "validate":
+        result = _run_validate_command(
+            args.run_id,
+            args.profile,
+            factory_home=factory_home,
+            settings=settings,
+        )
     return result
 
 
