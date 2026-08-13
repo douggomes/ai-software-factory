@@ -48,11 +48,14 @@ antes da persistência. Esta fatia não executa código não confiável.
 - `src/ai_software_factory/adapters/process/asyncio_runner.py`
 - `src/ai_software_factory/adapters/process/output_sanitizer.py`
 - `src/ai_software_factory/adapters/git/evaluation_workspace.py`
+- `src/ai_software_factory/cli.py`
 - `tests/contract/processes/**`
 - `tests/contract/evaluation_workspace/**`
+- `tests/contract/workspace/test_workspace_manager_contract.py`
 - `tests/integration/test_process_runner.py`
 - `tests/integration/test_process_output_sanitizer.py`
 - `tests/integration/test_evaluation_workspace.py`
+- `tests/integration/test_git_worktree.py`
 - `tests/security/__init__.py`
 - `tests/security/test_evaluation_workspace.py`
 - `docs/runbooks/evaluation-workspace.md`
