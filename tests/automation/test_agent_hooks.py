@@ -128,9 +128,40 @@ def test_hook_payload_size_is_bounded() -> None:
         read_payload(io.BytesIO(b"{" + b"x" * MAX_INPUT_BYTES + b"}"))
 
 
-def test_real_claude_and_codex_payloads_are_equivalent_and_fail_closed() -> None:
-    script = ROOT / "scripts/agent_automation/hook.py"
-    pattern = load_ready_policy(ROOT).allowed_patterns[0]
+def _hook_repository_fixture(tmp_path: Path, *, status: str) -> tuple[Path, Path]:
+    script = tmp_path / "scripts/agent_automation/hook.py"
+    script.parent.mkdir(parents=True)
+    shutil.copy2(ROOT / "scripts/agent_automation/hook.py", script)
+    (tmp_path / ".git").mkdir()
+    (tmp_path / "AGENTS.md").write_text("fixture\n", encoding="utf-8")
+    planning = tmp_path / "docs/planejamento"
+    planning.mkdir(parents=True)
+    (planning / "task1.md").write_text(
+        "\n".join(
+            (
+                "---",
+                'task_id: "TASK-001"',
+                f"status: {status}",
+                f'baseline_commit: "{"0" * 40}"',
+                "---",
+                "",
+                "## Arquivos permitidos",
+                "",
+                "- `AGENTS.md`",
+                "- `src/**`",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    return tmp_path, script
+
+
+def test_real_claude_and_codex_payloads_are_equivalent_and_fail_closed(
+    tmp_path: Path,
+) -> None:
+    root, script = _hook_repository_fixture(tmp_path, status="ready")
+    pattern = load_ready_policy(root).allowed_patterns[0]
     allowed_path = pattern.replace("/**", "/hook-probe.txt")
     cases = (
         ("claude", {"tool_name": "Write", "tool_input": {"file_path": allowed_path}}, 0),
@@ -160,7 +191,7 @@ def test_real_claude_and_codex_payloads_are_equivalent_and_fail_closed() -> None
     for host, payload, expected in cases:
         result = subprocess.run(  # noqa: S603 - fixed repository hook command
             [sys.executable, str(script), "--host", host, "--phase", "pre"],
-            cwd=ROOT,
+            cwd=root,
             input=json.dumps(payload),
             capture_output=True,
             text=True,
@@ -175,6 +206,24 @@ def test_real_claude_and_codex_payloads_are_equivalent_and_fail_closed() -> None
             command = tool_input.get("command", tool_input.get("cmd"))
             assert isinstance(command, str)
             assert command not in result.stderr
+
+
+def test_hook_fails_closed_when_no_task_is_ready(tmp_path: Path) -> None:
+    root, script = _hook_repository_fixture(tmp_path, status="planned")
+    payload = {"tool_name": "Bash", "tool_input": {"command": "git status --short"}}
+
+    result = subprocess.run(  # noqa: S603 - isolated copy of the fixed hook script
+        [sys.executable, str(script), "--host", "claude", "--phase", "pre"],
+        cwd=root,
+        input=json.dumps(payload),
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=False,
+    )
+
+    assert result.returncode == DENIED
+    assert result.stderr == "agent-policy: denied: exactly one ready task is required\n"
 
 
 def test_scope_audit_keeps_committed_changes_visible_from_baseline(tmp_path: Path) -> None:

@@ -7,3 +7,4 @@ ADRs são imutáveis após aceitos; mudanças posteriores criam um novo ADR que 
 - [ADR-0003 — Worktree Git isolado por task](0003-git-worktree-per-task.md)
 - [ADR-0004 — Automação portátil entre agentes](0004-portable-agent-automation.md)
 - [ADR-0005 — Runtime de modelos exclusivamente em nuvem](0005-cloud-only-model-runtime.md)
+- [ADR-0006 — Isolamento forte para validação de código não confiável](0006-strong-isolation-for-validation.md)
