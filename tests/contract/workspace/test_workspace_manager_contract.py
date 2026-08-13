@@ -11,8 +11,10 @@ import pytest
 from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
 from ai_software_factory.adapters.persistence.artifact_store import FilesystemArtifactStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.workspace_models import WorkspaceRequest
+from ai_software_factory.ports.evaluation_workspace import WorkspaceLockCapability
 from ai_software_factory.ports.workspace import WorkspaceManager
 
 
@@ -23,9 +25,12 @@ async def test_workspace_manager_contract(tmp_path: Path) -> None:
     repo, base = _create_repository(tmp_path, git)
     factory_home = tmp_path / "factory"
     store = FilesystemArtifactStore(factory_home)
-    manager: WorkspaceManager = GitWorktreeManager(
-        AsyncioProcessRunner(store), store, Path(git).resolve()
+    concrete_manager = GitWorktreeManager(
+        AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer),
+        store,
+        Path(git).resolve(),
     )
+    manager: WorkspaceManager = concrete_manager
     request = WorkspaceRequest(
         repository=repo,
         factory_home=factory_home,
@@ -35,8 +40,21 @@ async def test_workspace_manager_contract(tmp_path: Path) -> None:
     )
 
     workspace = await manager.prepare(request)
+    capability: WorkspaceLockCapability = concrete_manager
+    lease = capability.borrow_lock_lease(workspace)
     snapshot = await manager.inspect(workspace)
 
+    assert lease.active
+    concrete_manager.close()
+    assert not lease.active
+    lease.close()
+    concrete_manager = GitWorktreeManager(
+        AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer),
+        store,
+        Path(git).resolve(),
+    )
+    manager = concrete_manager
+    workspace = await manager.prepare(request)
     assert snapshot.clean
     assert snapshot.head_commit == base
     await manager.clean(workspace, confirm=True)

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import shutil
 import stat
 import subprocess
@@ -13,9 +14,11 @@ from typing import Final
 import pytest
 
 from ai_software_factory import cli
+from ai_software_factory.adapters.git import worktrees as worktrees_module
 from ai_software_factory.adapters.git.worktrees import GitWorktreeManager
 from ai_software_factory.adapters.persistence.artifact_store import FilesystemArtifactStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
 from ai_software_factory.core.ids import RunId, TaskId
 from ai_software_factory.core.workspace_models import WorkspaceRequest
 from ai_software_factory.ports.workspace import (
@@ -68,7 +71,10 @@ def workspace_context(
 ) -> tuple[GitWorktreeManager, GitWorktreeManager, Path]:
     factory_home = tmp_path / "factory-home"
     artifact_store = FilesystemArtifactStore(factory_home)
-    runner = AsyncioProcessRunner(artifact_store)
+    runner = AsyncioProcessRunner(
+        artifact_store,
+        sanitizer_factory=StreamingOutputSanitizer,
+    )
     return (
         GitWorktreeManager(runner, artifact_store, git_executable),
         GitWorktreeManager(runner, artifact_store, git_executable),
@@ -175,6 +181,104 @@ async def test_single_writer_lock(
     manager_one.close()
     manager_two.close()
     assert workspace.lock_path.exists()
+
+
+@pytest.mark.asyncio
+async def test_invalid_lease_token_cannot_release_borrowed_lock(
+    repository: tuple[Path, str, Path],
+    workspace_context: tuple[GitWorktreeManager, GitWorktreeManager, Path],
+) -> None:
+    repo, base, _ = repository
+    manager_one, manager_two, factory_home = workspace_context
+    request = _request(repo, factory_home, base)
+    workspace = await manager_one.prepare(request)
+    lease = manager_one.borrow_lock_lease(workspace)
+
+    manager_one._return_lock_lease(  # pyright: ignore[reportPrivateUsage]
+        workspace.lock_path,
+        "invalid-lease-token",
+    )
+    manager_one.close()
+
+    assert not lease.active
+    with pytest.raises(WorkspaceLockError):
+        await manager_two.prepare(request)
+
+    lease.close()
+    reopened = await manager_two.prepare(request)
+    assert reopened == workspace
+    manager_two.close()
+
+
+@pytest.mark.asyncio
+async def test_replaced_lock_path_invalidates_active_lease(
+    repository: tuple[Path, str, Path],
+    workspace_context: tuple[GitWorktreeManager, GitWorktreeManager, Path],
+) -> None:
+    repo, base, _ = repository
+    manager_one, manager_two, factory_home = workspace_context
+    request = _request(repo, factory_home, base)
+    workspace = await manager_one.prepare(request)
+    lease = manager_one.borrow_lock_lease(workspace)
+    preserved = workspace.lock_path.with_suffix(".preserved")
+    workspace.lock_path.rename(preserved)
+    workspace.lock_path.write_text(
+        f"{workspace.run_id.value}\n{workspace.task_id.value}\n",
+        encoding="ascii",
+    )
+    workspace.lock_path.chmod(0o600)
+
+    assert not lease.active
+    replacement = await manager_two.prepare(request)
+    assert replacement == workspace
+
+    lease.close()
+    manager_one.close()
+    manager_two.close()
+    workspace.lock_path.unlink()
+    preserved.rename(workspace.lock_path)
+
+
+@pytest.mark.asyncio
+async def test_lock_swap_during_acquisition_fails_before_git_effect(
+    repository: tuple[Path, str, Path],
+    workspace_context: tuple[GitWorktreeManager, GitWorktreeManager, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    repo, base, _ = repository
+    manager_one, manager_two, factory_home = workspace_context
+    request = _request(repo, factory_home, base)
+    expected_lock = factory_home / "locks" / "repo" / request.run_id.value / "TASK-007.lock"
+    preserved = expected_lock.with_suffix(".opened")
+    original_open = os.open
+    swapped = False
+
+    def swap_after_open(
+        path: str | bytes | os.PathLike[str],
+        flags: int,
+        mode: int = 0o777,
+        *,
+        dir_fd: int | None = None,
+    ) -> int:
+        nonlocal swapped
+        fd = original_open(path, flags, mode, dir_fd=dir_fd)
+        if Path(os.fsdecode(path)) == expected_lock and flags & os.O_RDWR and not swapped:
+            expected_lock.rename(preserved)
+            expected_lock.write_bytes(b"")
+            expected_lock.chmod(0o600)
+            swapped = True
+        return fd
+
+    monkeypatch.setattr(worktrees_module.os, "open", swap_after_open)
+    with pytest.raises(WorkspaceLockError):
+        await manager_one.prepare(request)
+    monkeypatch.setattr(worktrees_module.os, "open", original_open)
+
+    expected_lock.unlink()
+    preserved.rename(expected_lock)
+    workspace = await manager_two.prepare(request)
+    assert workspace.lock_path == expected_lock
+    manager_two.close()
 
 
 @pytest.mark.asyncio

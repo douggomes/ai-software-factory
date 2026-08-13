@@ -10,9 +10,11 @@ from __future__ import annotations
 import contextlib
 import fcntl
 import hashlib
+import hmac
 import os
 import stat
 import uuid
+from collections.abc import Callable
 from pathlib import Path
 from typing import Final, cast
 
@@ -20,6 +22,7 @@ from ai_software_factory.core.ids import AttemptId
 from ai_software_factory.core.process_models import ProcessPolicy, ProcessRequest, TrustProfile
 from ai_software_factory.core.workspace_models import Workspace, WorkspaceRequest, WorkspaceSnapshot
 from ai_software_factory.ports.artifacts import ArtifactError, ArtifactRef, ArtifactStore
+from ai_software_factory.ports.evaluation_workspace import WorkspaceLockLease
 from ai_software_factory.ports.processes import ProcessRunner
 from ai_software_factory.ports.workspace import (
     WorkspaceCleanupError,
@@ -38,6 +41,25 @@ _LOCKS_DIR: Final[str] = "locks"
 _STATUS_PATH_OFFSET: Final[int] = 3
 
 
+class _GitWorkspaceLockLease(WorkspaceLockLease):
+    """Opaque borrow that keeps a manager lock physical until it is returned."""
+
+    def __init__(self, active: Callable[[], bool], release: Callable[[], None]) -> None:
+        self._active = active
+        self._release = release
+        self._closed = False
+
+    @property
+    def active(self) -> bool:
+        return not self._closed and self._active()
+
+    def close(self) -> None:
+        if self._closed:
+            return
+        self._closed = True
+        self._release()
+
+
 class GitWorktreeManager(WorkspaceManager):
     """Manage one or more isolated Git workspaces through injected ports."""
 
@@ -51,6 +73,11 @@ class GitWorktreeManager(WorkspaceManager):
         self._artifact_store = artifact_store
         self._git_executable = Path(git_executable)
         self._held_locks: dict[Path, int] = {}
+        self._lock_tokens: dict[Path, str] = {}
+        self._lock_identities: dict[Path, tuple[int, int, int, int, int]] = {}
+        self._lock_hashes: dict[Path, str] = {}
+        self._borrow_counts: dict[Path, int] = {}
+        self._pending_close: set[Path] = set()
 
     async def prepare(self, request: WorkspaceRequest) -> Workspace:
         repository = _canonical_directory(request.repository, "repository")
@@ -61,6 +88,11 @@ class GitWorktreeManager(WorkspaceManager):
         if held_fd is None:
             held_fd = _acquire_lock(workspace.lock_path, workspace)
             self._held_locks[workspace.lock_path] = held_fd
+            self._lock_tokens[workspace.lock_path] = uuid.uuid4().hex
+            self._lock_identities[workspace.lock_path] = _lock_identity(held_fd)
+            self._lock_hashes[workspace.lock_path] = _lock_hash(held_fd)
+        elif workspace.lock_path in self._pending_close:
+            raise WorkspaceLockError("workspace lock is closing an active lease")
         try:
             await self._assert_repository(repository, workspace)
             if _lexists(workspace.worktree_path):
@@ -73,7 +105,25 @@ class GitWorktreeManager(WorkspaceManager):
             if acquired_here:
                 _release_lock(held_fd)
                 self._held_locks.pop(workspace.lock_path, None)
+                self._lock_tokens.pop(workspace.lock_path, None)
+                self._lock_identities.pop(workspace.lock_path, None)
+                self._lock_hashes.pop(workspace.lock_path, None)
             raise
+
+    def borrow_lock_lease(self, workspace: Workspace) -> WorkspaceLockLease:
+        """Borrow the active manager authority without exposing its descriptor."""
+        _assert_workspace_paths(workspace)
+        token = self._lock_tokens.get(workspace.lock_path)
+        if token is None or workspace.lock_path in self._pending_close:
+            raise WorkspaceLockError("workspace lock is not actively manager-owned")
+        self._borrow_counts[workspace.lock_path] = (
+            self._borrow_counts.get(workspace.lock_path, 0) + 1
+        )
+        path = workspace.lock_path
+        return _GitWorkspaceLockLease(
+            lambda: self._is_lease_active(path, token),
+            lambda: self._return_lock_lease(path, token),
+        )
 
     async def inspect(self, workspace: Workspace) -> WorkspaceSnapshot:
         _assert_workspace_paths(workspace)
@@ -115,10 +165,15 @@ class GitWorktreeManager(WorkspaceManager):
         lock_fd = self._held_locks.get(workspace.lock_path)
         if lock_fd is None:
             raise WorkspaceLockError("cleanup requires the manager-owned writer lock")
+        if self._borrow_counts.get(workspace.lock_path, 0):
+            raise WorkspaceLockError("cleanup cannot invalidate a borrowed workspace lock")
         _assert_workspace_paths(workspace)
         if not _lexists(workspace.worktree_path):
             _release_lock(lock_fd)
             self._held_locks.pop(workspace.lock_path, None)
+            self._lock_tokens.pop(workspace.lock_path, None)
+            self._lock_identities.pop(workspace.lock_path, None)
+            self._lock_hashes.pop(workspace.lock_path, None)
             return
         _assert_no_symlinks(workspace.worktree_path)
         await self._assert_existing_workspace(workspace)
@@ -134,12 +189,63 @@ class GitWorktreeManager(WorkspaceManager):
             if not _lexists(workspace.worktree_path):
                 _release_lock(lock_fd)
                 self._held_locks.pop(workspace.lock_path, None)
+                self._lock_tokens.pop(workspace.lock_path, None)
+                self._lock_identities.pop(workspace.lock_path, None)
+                self._lock_hashes.pop(workspace.lock_path, None)
 
     def close(self) -> None:
         """Release manager-owned locks without removing worktrees."""
-        for lock_fd in tuple(self._held_locks.values()):
+        for path, lock_fd in tuple(self._held_locks.items()):
+            if self._borrow_counts.get(path, 0):
+                self._pending_close.add(path)
+                continue
+            self._lock_tokens.pop(path, None)
+            self._lock_identities.pop(path, None)
+            self._lock_hashes.pop(path, None)
             _release_lock(lock_fd)
-        self._held_locks.clear()
+            self._held_locks.pop(path, None)
+
+    def _is_lease_active(self, path: Path, token: str) -> bool:
+        fd = self._held_locks.get(path)
+        expected_identity = self._lock_identities.get(path)
+        expected_hash = self._lock_hashes.get(path)
+        if (
+            fd is None
+            or expected_identity is None
+            or expected_hash is None
+            or path in self._pending_close
+            or self._lock_tokens.get(path) != token
+        ):
+            return False
+        try:
+            path_stat = os.lstat(path)
+            return _lock_identity(fd) == expected_identity == _stat_identity(
+                path_stat
+            ) and hmac.compare_digest(_lock_hash(fd), expected_hash)
+        except OSError:
+            return False
+
+    def _return_lock_lease(self, path: Path, token: str) -> None:
+        current_token = self._lock_tokens.get(path)
+        if current_token is None or not hmac.compare_digest(current_token, token):
+            return
+        count = self._borrow_counts.get(path, 0)
+        if count <= 0:
+            return
+        if count == 1:
+            self._borrow_counts.pop(path, None)
+        else:
+            self._borrow_counts[path] = count - 1
+            return
+        if path not in self._pending_close:
+            return
+        lock_fd = self._held_locks.pop(path, None)
+        self._pending_close.discard(path)
+        self._lock_tokens.pop(path, None)
+        self._lock_identities.pop(path, None)
+        self._lock_hashes.pop(path, None)
+        if lock_fd is not None:
+            _release_lock(lock_fd)
 
     async def _assert_repository(self, repository: Path, workspace: Workspace) -> None:
         output, _ = await self._git(workspace, repository, ("rev-parse", "--show-toplevel"))
@@ -410,19 +516,49 @@ def _acquire_lock(lock_path: Path, workspace: Workspace) -> int:
         fd = os.open(lock_path, flags, _LOCK_MODE)
     except OSError as error:
         raise WorkspaceLockError("unable to open workspace lock") from error
+    acquired = False
     try:
-        os.chmod(lock_path, _LOCK_MODE)
+        os.fchmod(fd, _LOCK_MODE)
         fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
         os.ftruncate(fd, 0)
-        os.write(fd, f"{workspace.run_id.value}\n{workspace.task_id.value}\n".encode("ascii"))
+        content = f"{workspace.run_id.value}\n{workspace.task_id.value}\n".encode("ascii")
+        _write_lock_content(fd, content)
         os.fsync(fd)
+        _validate_acquired_lock(fd, lock_path, content)
+        acquired = True
         return fd
     except BlockingIOError as error:
-        _release_lock(fd)
         raise WorkspaceLockError("workspace writer lock is already held") from error
     except OSError as error:
-        _release_lock(fd)
         raise WorkspaceLockError("unable to acquire workspace lock") from error
+    finally:
+        if not acquired:
+            _release_lock(fd)
+
+
+def _write_lock_content(fd: int, content: bytes) -> None:
+    offset = 0
+    while offset < len(content):
+        written = os.write(fd, content[offset:])
+        if written <= 0:
+            raise WorkspaceLockError("workspace lock write made no progress")
+        offset += written
+
+
+def _validate_acquired_lock(fd: int, path: Path, expected: bytes) -> None:
+    try:
+        descriptor_stat = os.fstat(fd)
+        path_stat = os.lstat(path)
+    except OSError as error:
+        raise WorkspaceLockError("workspace lock identity changed during acquisition") from error
+    if (
+        not stat.S_ISREG(descriptor_stat.st_mode)
+        or descriptor_stat.st_uid != os.getuid()
+        or stat.S_IMODE(descriptor_stat.st_mode) != _LOCK_MODE
+        or _stat_identity(descriptor_stat) != _stat_identity(path_stat)
+        or not hmac.compare_digest(os.pread(fd, len(expected) + 1, 0), expected)
+    ):
+        raise WorkspaceLockError("workspace lock identity changed during acquisition")
 
 
 def _release_lock(fd: int) -> None:
@@ -430,6 +566,18 @@ def _release_lock(fd: int) -> None:
         fcntl.flock(fd, fcntl.LOCK_UN)
     with contextlib.suppress(OSError):
         os.close(fd)
+
+
+def _lock_identity(fd: int) -> tuple[int, int, int, int, int]:
+    return _stat_identity(os.fstat(fd))
+
+
+def _lock_hash(fd: int) -> str:
+    return hashlib.sha256(os.pread(fd, 4096, 0)).hexdigest()
+
+
+def _stat_identity(value: os.stat_result) -> tuple[int, int, int, int, int]:
+    return (value.st_dev, value.st_ino, value.st_mode, value.st_uid, value.st_size)
 
 
 def _lexists(path: Path) -> bool:

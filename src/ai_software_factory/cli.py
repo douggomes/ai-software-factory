@@ -30,6 +30,7 @@ from ai_software_factory.adapters.persistence.artifact_store import (
 )
 from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
 from ai_software_factory.application.queries import (
     RunEventsQuery,
     RunStatusQuery,
@@ -329,7 +330,12 @@ def _run_workspace_inspect_command(run_id_raw: str, *, factory_home: Path) -> in
             return _EXIT_NOT_FOUND
         artifact_store = FilesystemArtifactStore(factory_home)
         manager = GitWorktreeManager(
-            AsyncioProcessRunner(artifact_store), artifact_store, git_executable
+            AsyncioProcessRunner(
+                artifact_store,
+                sanitizer_factory=StreamingOutputSanitizer,
+            ),
+            artifact_store,
+            git_executable,
         )
         snapshots = asyncio.run(
             _inspect_workspace_candidates(manager, factory_home, git_executable, run_id, candidates)

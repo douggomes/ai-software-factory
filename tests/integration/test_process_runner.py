@@ -12,7 +12,9 @@ from typing import cast
 import pytest
 
 from ai_software_factory.adapters.persistence.artifact_store import FilesystemArtifactStore
+from ai_software_factory.adapters.process import asyncio_runner as asyncio_runner_module
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
+from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
 from ai_software_factory.core.ids import AttemptId, RunId
 from ai_software_factory.core.process_models import (
     ProcessPolicy,
@@ -20,7 +22,12 @@ from ai_software_factory.core.process_models import (
     TrustProfile,
 )
 from ai_software_factory.ports.artifacts import ArtifactRef
-from ai_software_factory.ports.processes import ProcessIsolationError, ProcessPolicyError
+from ai_software_factory.ports.output_sanitization import OutputSanitizationError
+from ai_software_factory.ports.processes import (
+    ProcessArtifactError,
+    ProcessIsolationError,
+    ProcessPolicyError,
+)
 
 _OUTPUT_LIMIT_BYTES = 64
 
@@ -42,7 +49,6 @@ def _request(  # noqa: PLR0913 - mirrors the independently testable request cont
     termination_grace_seconds: float = 0.2,
     max_output_bytes: int = 4_194_304,
     trust_profile: TrustProfile = TrustProfile.TRUSTED,
-    isolation_available: bool | None = None,
 ) -> ProcessRequest:
     return ProcessRequest(
         argv=(str(executable),),
@@ -57,7 +63,6 @@ def _request(  # noqa: PLR0913 - mirrors the independently testable request cont
         termination_grace_seconds=termination_grace_seconds,
         max_output_bytes=max_output_bytes,
         trust_profile=trust_profile,
-        isolation_available=isolation_available,
         run_id=RunId("run-abc123def456"),
         attempt_id=AttemptId("att-abc123def456"),
     )
@@ -71,7 +76,7 @@ async def test_arguments_are_literal_and_policy_enforced(tmp_path: Path) -> None
         "import sys\nprint(repr(sys.argv[1:]))",
     )
     store = FilesystemArtifactStore(tmp_path / "artifacts")
-    runner = AsyncioProcessRunner(store)
+    runner = AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer)
     literal = "$(touch SHOULD_NOT_EXIST); `echo nope`; &&"
 
     request = _request(executable, tmp_path)
@@ -105,8 +110,105 @@ async def test_arguments_are_literal_and_policy_enforced(tmp_path: Path) -> None
     with pytest.raises(ProcessPolicyError):
         await runner.run(outside_request)
 
+
+@pytest.mark.asyncio
+async def test_spawn_retains_authorized_cwd_descriptor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable_root = tmp_path / "bin"
+    executable_root.mkdir()
+    executable = _fake_executable(
+        executable_root,
+        "read-marker.py",
+        "from pathlib import Path\nprint(Path('marker.txt').read_text().strip())",
+    )
+    authorized = tmp_path / "authorized"
+    authorized.mkdir()
+    (authorized / "marker.txt").write_text("authorized\n", encoding="utf-8")
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "marker.txt").write_text("replacement\n", encoding="utf-8")
+    retained = tmp_path / "authorized-retained"
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def swap_before_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        authorized.rename(retained)
+        authorized.symlink_to(replacement, target_is_directory=True)
+        try:
+            return await original_spawn(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        finally:
+            authorized.unlink()
+            retained.rename(authorized)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", swap_before_spawn)
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    runner = AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer)
+
+    result = await runner.run(_request(executable, authorized))
+
+    assert result.stdout_ref is not None
+    assert store.read(cast(ArtifactRef, result.stdout_ref)) == b"authorized\n"
+
     with pytest.raises(ProcessPolicyError):
         await runner.run(_request(executable, tmp_path / "missing-cwd"))
+
+
+@pytest.mark.asyncio
+async def test_spawn_executes_retained_authorized_bytes_after_path_swap(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = _fake_executable(tmp_path, "authorized.py", "print('authorized')")
+    replacement = _fake_executable(tmp_path, "replacement.py", "print('replacement')")
+    retained = tmp_path / "authorized-retained.py"
+    original_spawn = asyncio.create_subprocess_exec
+
+    async def swap_before_spawn(*args: object, **kwargs: object) -> asyncio.subprocess.Process:
+        executable.rename(retained)
+        replacement.rename(executable)
+        try:
+            return await original_spawn(*args, **kwargs)  # pyright: ignore[reportArgumentType]
+        finally:
+            executable.rename(replacement)
+            retained.rename(executable)
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", swap_before_spawn)
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    runner = AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer)
+
+    result = await runner.run(_request(executable, tmp_path))
+
+    assert result.stdout_ref is not None
+    assert store.read(cast(ArtifactRef, result.stdout_ref)) == b"authorized\n"
+
+
+@pytest.mark.asyncio
+async def test_in_place_executable_rewrite_during_copy_fails_closed(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    executable = _fake_executable(tmp_path, "stable.py", "print('authorized')")
+    original_copy = asyncio_runner_module._copy_executable_bytes  # pyright: ignore[reportPrivateUsage]
+
+    def rewrite_during_copy(source_fd: int, destination_fd: int, size: int) -> str:
+        digest = original_copy(source_fd, destination_fd, size)
+        original = executable.read_bytes()
+        replacement = original.replace(b"authorized", b"unauthorzd")
+        assert len(replacement) == len(original)
+        executable.write_bytes(replacement)
+        executable.chmod(stat.S_IRUSR | stat.S_IWUSR | stat.S_IXUSR)
+        return digest
+
+    monkeypatch.setattr(
+        asyncio_runner_module,
+        "_copy_executable_bytes",
+        rewrite_during_copy,
+    )
+    runner = AsyncioProcessRunner(sanitizer_factory=StreamingOutputSanitizer)
+
+    with pytest.raises(ProcessPolicyError):
+        await runner.run(_request(executable, tmp_path))
 
 
 @pytest.mark.asyncio
@@ -128,7 +230,7 @@ async def test_timeout_kills_process_group(tmp_path: Path) -> None:
         "else:\n"
         "    time.sleep(30)\n",
     )
-    runner = AsyncioProcessRunner()
+    runner = AsyncioProcessRunner(sanitizer_factory=StreamingOutputSanitizer)
     task = asyncio.create_task(
         runner.run(
             _request(
@@ -179,7 +281,7 @@ async def test_cancellation_kills_process_group(tmp_path: Path) -> None:
         "else:\n"
         "    time.sleep(30)\n",
     )
-    runner = AsyncioProcessRunner()
+    runner = AsyncioProcessRunner(sanitizer_factory=StreamingOutputSanitizer)
     task = asyncio.create_task(
         runner.run(
             _request(
@@ -213,6 +315,113 @@ async def test_cancellation_kills_process_group(tmp_path: Path) -> None:
 
 
 @pytest.mark.asyncio
+async def test_timeout_kills_descendant_after_leader_exits(tmp_path: Path) -> None:
+    child_pid_file = tmp_path / "timeout-orphan.pid"
+    executable = _fake_executable(
+        tmp_path,
+        "orphan-pipe.py",
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        f"    Path({str(child_pid_file)!r}).write_text(str(os.getpid()))\n"
+        "    time.sleep(30)\n"
+        "else:\n"
+        "    os._exit(0)\n",
+    )
+    store = FilesystemArtifactStore(tmp_path / "artifacts")
+    runner = AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer)
+
+    result = await runner.run(
+        _request(
+            executable,
+            tmp_path,
+            timeout_seconds=1,
+            termination_grace_seconds=0.1,
+        )
+    )
+
+    assert result.timed_out
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    await asyncio.sleep(0.1)
+    assert not _pid_exists(child_pid)
+
+
+@pytest.mark.asyncio
+async def test_sanitizer_failure_kills_descendant_after_leader_exits(tmp_path: Path) -> None:
+    child_pid_file = tmp_path / "sanitizer-child.pid"
+    executable = _fake_executable(
+        tmp_path,
+        "sanitizer-orphan.py",
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        f"    Path({str(child_pid_file)!r}).write_text(str(os.getpid()))\n"
+        "    print('trigger-reader-failure', flush=True)\n"
+        "    time.sleep(30)\n"
+        "else:\n"
+        "    os._exit(0)\n",
+    )
+
+    class FailingSanitizer:
+        @property
+        def truncated(self) -> bool:
+            return False
+
+        def feed(self, data: bytes) -> bytes:
+            raise OutputSanitizationError("injected sanitizer failure")
+
+        def finish(self) -> bytes:
+            return b""
+
+    def failing_factory(max_bytes: int, secrets: object) -> FailingSanitizer:
+        del max_bytes, secrets
+        return FailingSanitizer()
+
+    runner = AsyncioProcessRunner(sanitizer_factory=failing_factory)
+
+    with pytest.raises(ProcessArtifactError):
+        await runner.run(_request(executable, tmp_path, termination_grace_seconds=0.1))
+
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+    await asyncio.sleep(0.1)
+    assert not _pid_exists(child_pid)
+
+
+@pytest.mark.asyncio
+async def test_cancellation_kills_descendant_after_leader_exits(tmp_path: Path) -> None:
+    child_pid_file = tmp_path / "cancel-orphan.pid"
+    executable = _fake_executable(
+        tmp_path,
+        "cancel-orphan.py",
+        "import os, time\n"
+        "from pathlib import Path\n"
+        "child = os.fork()\n"
+        "if child == 0:\n"
+        f"    Path({str(child_pid_file)!r}).write_text(str(os.getpid()))\n"
+        "    time.sleep(30)\n"
+        "else:\n"
+        "    os._exit(0)\n",
+    )
+    runner = AsyncioProcessRunner(sanitizer_factory=StreamingOutputSanitizer)
+    task = asyncio.create_task(runner.run(_request(executable, tmp_path, timeout_seconds=10)))
+    for _ in range(200):
+        if child_pid_file.exists():
+            break
+        await asyncio.sleep(0.01)
+    assert child_pid_file.exists()
+    child_pid = int(child_pid_file.read_text(encoding="utf-8"))
+
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    await asyncio.sleep(0.1)
+    assert not _pid_exists(child_pid)
+
+
+@pytest.mark.asyncio
 async def test_canary_limits_and_fail_closed(tmp_path: Path) -> None:
     canary = "AIF-CANARY-DO-NOT-LEAK"
     executable = _fake_executable(
@@ -224,7 +433,7 @@ async def test_canary_limits_and_fail_closed(tmp_path: Path) -> None:
         "sys.stderr.write('secret=' + os.environ['AIF_CANARY'])\n",
     )
     store = FilesystemArtifactStore(tmp_path / "artifacts")
-    runner = AsyncioProcessRunner(store)
+    runner = AsyncioProcessRunner(store, sanitizer_factory=StreamingOutputSanitizer)
     request = _request(
         executable,
         tmp_path,
@@ -249,7 +458,6 @@ async def test_canary_limits_and_fail_closed(tmp_path: Path) -> None:
         executable,
         tmp_path,
         trust_profile=TrustProfile.UNTRUSTED,
-        isolation_available=False,
     )
     with pytest.raises(ProcessIsolationError):
         await runner.run(untrusted)
