@@ -11,7 +11,7 @@ risk_level: critical
 # TASK-013 — Adapter OpenCode protegido
 
 > [!important] Contrato de execução por IA
-> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md) e [security-review.md](security-review.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
+> Execute somente quando `status: ready`, seguindo [AGENTS.md](../../AGENTS.md), [engineering-standards.md](engineering-standards.md), [security-review.md](security-review.md) e [ADR-0005](../adr/0005-cloud-only-model-runtime.md). O agente não pode alterar este contrato nem ampliar paths, autoridade ou defaults.
 
 ## Valor entregue
 
@@ -67,7 +67,9 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | `auto_mode` | false; só true em perfil com denies testados |
 | `max_event_bytes` | 1_048_576 |
 | `billing_guard` | bloqueia API key incremental quando `no_incremental_cost=true` |
-| `model_id` | config obrigatório e validado; nunca no Core |
+| `model_id` | config cloud obrigatório e validado; nunca no Core |
+| `provider_transport` | permitido somente ao OpenCode CLI em profile live explícito; web/tools continuam deny |
+| `inference_mode` | cloud-only; endpoint local/self-hosted deny |
 
 ## Passos de implementação
 
@@ -86,7 +88,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 - [ ] **AC-001** — Fixtures success/quota/rate-limit/partial/malformed normalizam para eventos de domínio corretos.
 - [ ] **AC-002** — Repo malicioso não libera web, external dir, Git ou segredo e output excessivo é limitado.
-- [ ] **AC-003** — Preflight bloqueia model inexistente/API key proibida; testes padrão nunca chamam OpenCode.
+- [ ] **AC-003** — Preflight bloqueia model inexistente, endpoint local/self-hosted e API key proibida; testes padrão nunca chamam OpenCode.
 
 ## Matriz de verificação
 
@@ -94,7 +96,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 |---|---|---|---|
 | AC-001 | `uv run pytest tests/contract/agents/opencode -q` | contract suite compartilhada aprovada | fixture/result matrix |
 | AC-002 | `uv run pytest tests/security/test_opencode_policy.py::test_repo_prompt_cannot_enable_denied_capabilities -q` | spies proibidos zerados | policy audit snapshot |
-| AC-003 | `uv run pytest tests/security/test_opencode_policy.py::test_preflight_and_offline_suite -q` | falha antes do processo; zero live calls | preflight report |
+| AC-003 | `uv run pytest tests/security/test_opencode_policy.py::test_preflight_and_offline_suite -q` | config não cloud falha antes do processo; zero live calls | preflight report |
 
 ## Validação manual no terminal
 

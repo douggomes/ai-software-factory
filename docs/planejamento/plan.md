@@ -1,9 +1,9 @@
 ---
 title: Plano de implementação da AI Software Factory
 status: ready
-version: "1.2"
+version: "1.3"
 target_release: "V1.1"
-date: 2026-08-11
+date: 2026-08-12
 tags:
   - ai-software-factory
   - python
@@ -18,6 +18,8 @@ tags:
 Entregar uma Factory local, assíncrona e auditável que transforma uma SPEC em alterações isoladas, valida evidências, troca de worker sem perder trabalho, repara falhas de qualidade, solicita revisão independente, preserva aprovação humana e mede objetivamente arquiteturas agentic.
 
 O plano começa em um diretório vazio e termina na V1.1. As decisões que resolveram ambiguidades estão em [brainstorming.md](brainstorming.md).
+O runtime cloud-only e sua fronteira de dados são normatizados pelo
+[ADR-0005](../adr/0005-cloud-only-model-runtime.md).
 
 > [!important] Norma obrigatória
 > Toda implementação e toda task herdam a [norma de engenharia](engineering-standards.md) e os controles do [threat model e revisão de segurança](security-review.md). Clean Code, SOLID e secure-by-design são critérios de conclusão, não recomendações. Sucesso funcional sem conformidade não encerra uma task.
@@ -32,7 +34,8 @@ O plano começa em um diretório vazio e termina na V1.1. As decisões que resol
 - Git worktree por task e lock de writer;
 - gates determinísticos configuráveis;
 - adapters OpenCode, Codex e Claude Code;
-- planner local opcional via Ollama;
+- inferência exclusivamente em nuvem via OpenCode, Codex e Claude Code;
+- planner estruturado reutilizando os mesmos adapters de coding agent;
 - AgentPool, Failure Normalizer, Circuit Breaker e Continuation Package;
 - reviewer independente, repair loop e human gate;
 - Context Builder determinístico e MCP semântico via stdio;
@@ -51,6 +54,7 @@ O plano começa em um diretório vazio e termina na V1.1. As decisões que resol
 - decomposição autônoma da SPEC;
 - auto-merge ou auto-push;
 - workers distribuídos;
+- runtimes, servidores ou downloads de modelos para inferência local;
 - treinamento/fine-tuning de modelos.
 
 ## 3. Princípios e invariantes
@@ -89,7 +93,8 @@ flowchart LR
     Pool --> OpenCode["OpenCode adapter"]
     Pool --> Codex["Codex adapter"]
     Pool --> Claude["Claude adapter"]
-    Pool --> Ollama["Ollama adapter"]
+    App --> Planner["Cloud planner role"]
+    Planner --> Pool
     Persist --> SQLite[("SQLite")]
     Persist --> Artifacts[("Artifacts")]
     Workspace --> Worktree[("Git worktree")]
@@ -379,6 +384,7 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 | `AgentWorker` | Emitir `AsyncIterator[AgentEvent]` normalizado |
 | `FailureNormalizer` | Traduzir falhas específicas para taxonomia de domínio |
 | `AgentPoolSelector` | Explicar elegibilidade, exclusões e seleção |
+| `Planner` | Produzir `PlanResult` estruturado por um worker cloud read-only ou fallback determinístico |
 | `ValidationGate` | Produzir evidência determinística e persistível |
 | `ContextBuilder` | Criar manifest com proveniência e hashes |
 | `Reviewer` | Mapear cada AC para pass/fail/unknown + evidência |
@@ -390,7 +396,7 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 |---|---:|---|---|
 | V0.1 | 1–14, 32 | Pipeline real com automação agnóstica, OpenCode, worktree, estado, gates e failover sem perder diff | Claude/Codex compartilham política; Fake #1 quota → Fake #2 continua; OpenCode passa contract/security tests; dossier V0.1 |
 | V0.2 | 15–18 | Codex reviewer, repair limitado e aprovação/commit seguros | ACs estruturados; repair revalida; approval exata e TOCTOU testado |
-| V0.3 | 19–22 | Contexto, Claude, Ollama e perfis reproduzíveis | Manifest/hash estáveis; Ollama loopback; fallback sem custo oculto; dossier V0.3 |
+| V0.3 | 19–22 | Contexto, Claude, planner cloud e perfis reproduzíveis | Manifest/hash estáveis; planner sem autoridade; fallback determinístico sem custo oculto; dossier V0.3 |
 | V0.4 | 23–24 | MCP semântico e observabilidade segura | MCP stdio isolado; traces/métricas redigidos; dossier V0.4 |
 | V0.5 | 25–26 | Benchmark de cinco tasks com hidden tests | Mesma base/budget, isolamento comprovado, raw results e dossier V0.5 |
 | V1.0 | 27–28 | Recovery, idempotência, cancellation e hardening | Chaos/security matrix, upgrade/recovery e dossier V1.0 |
@@ -425,7 +431,7 @@ O planejamento é estado versionado da Factory e nunca entra no `.gitignore`. De
 | TASK-018 | [task18.md](task18.md) | Human gate, commit seguro e V0.2 | 17 |
 | TASK-019 | [task19.md](task19.md) | Context Builder reproduzível | 18 |
 | TASK-020 | [task20.md](task20.md) | Adapter Claude protegido | 18 |
-| TASK-021 | [task21.md](task21.md) | Planner Ollama local | 19, 20 |
+| TASK-021 | [task21.md](task21.md) | Planner cloud agnóstico | 19, 20 |
 | TASK-022 | [task22.md](task22.md) | Perfis/fallback e V0.3 | 21 |
 | TASK-023 | [task23.md](task23.md) | MCP semântico isolado | 22 |
 | TASK-024 | [task24.md](task24.md) | Observabilidade segura e V0.4 | 23 |
@@ -446,7 +452,7 @@ flowchart LR
     T14 --> T15["15 Codex"] --> T16["16 Review"] --> T17["17 Repair"] --> T18["18 Approval / V0.2"]
     T18 --> T19["19 Context"]
     T18 --> T20["20 Claude"]
-    T19 --> T21["21 Ollama"]
+    T19 --> T21["21 Cloud planner"]
     T20 --> T21
     T21 --> T22["22 Profiles / V0.3"] --> T23["23 MCP"] --> T24["24 OTel / V0.4"]
     T24 --> T25["25 Harness"] --> T26["26 Dataset / V0.5"] --> T27["27 Recovery"] --> T28["28 Chaos / V1.0"]
@@ -487,6 +493,9 @@ O pipeline inclui secret scan no repositório/diff; a qualificação de release 
 - o [threat model](security-review.md) e NIST SSDF 1.1 orientam o secure SDLC; mudanças de trust boundary exigem revisão;
 - `no_incremental_cost = true` por padrão;
 - preflight bloqueia credenciais de API por consumo quando o perfil proíbe;
+- inferência de runtime é cloud-only pelos CLIs OpenCode, Codex e Claude Code; endpoint local ou self-hosted falha no preflight;
+- transporte ao provider é permitido somente ao processo do CLI em perfil live explícito; web e rede de tools continuam negados;
+- profile live fixa provider, classificação/retention e budget; somente context view mínima e secret-scanned pode sair do host;
 - tokens de autenticação nunca são logados ou copiados para artifacts;
 - ambiente de subprocesso é allowlist;
 - comandos são arrays de argumentos, nunca `shell=True`, com executável/cwd permitido e limites de tempo, output e recursos;
@@ -547,6 +556,7 @@ IDs de task ou run não entram como labels de métricas para evitar alta cardina
 - [ ] Cada task possui worktree e lock exclusivos.
 - [ ] Fake quota → continuação preserva diff, identidade e evidência.
 - [ ] Ao menos OpenCode, Codex e Claude passam contract tests; smoke real é opt-in.
+- [ ] Configuração de inferência aceita somente workers cloud suportados e rejeita endpoint local/self-hosted.
 - [ ] Gates determinísticos são configuráveis como listas de argumentos seguras.
 - [ ] Reviewer mapeia todos os ACs para pass/fail/unknown com evidência.
 - [ ] Repair e failover possuem budgets e métricas separados.
@@ -620,7 +630,6 @@ Não usar estimativas de calendário sem velocidade observada. Depois da V0.1, m
 - [Claude Code — programmatic usage](https://code.claude.com/docs/en/headless)
 - [OpenCode — CLI](https://opencode.ai/docs/cli/)
 - [OpenCode — permissions](https://opencode.ai/docs/permissions/)
-- [Ollama — Qwen 3.5 9B](https://ollama.com/library/qwen3.5:9b)
 - [MCP Python SDK](https://py.sdk.modelcontextprotocol.io/)
 - [OpenTelemetry Python](https://opentelemetry.io/docs/languages/python/)
 - [SQLite — WAL](https://sqlite.org/wal.html)

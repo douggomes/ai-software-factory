@@ -41,7 +41,7 @@ Workers são escolhidos por features, capacidades, saúde e histórico íntegro 
 - `schemas/routing-decision.v1.json`
 - `tests/unit/routing/**`
 - `tests/security/test_router_poisoning.py`
-- `docs/adr/0006-explainable-routing-over-llm-router.md`
+- `docs/adr/0008-explainable-routing-over-llm-router.md`
 
 Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
