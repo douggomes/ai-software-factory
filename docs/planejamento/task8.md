@@ -2,9 +2,9 @@
 title: "TASK-008 — Gates determinísticos e snapshots"
 task_id: TASK-008
 release: "V0.1"
-status: ready
-depends_on: [TASK-032]
-baseline_commit: "a3c04331e93134f600c85f7b57f1d940c3ba650c"
+status: planned
+depends_on: [TASK-036]
+baseline_commit: "TO_BE_PINNED"
 risk_level: high
 ---
 
@@ -19,17 +19,18 @@ Toda alteração recebe avaliação reproduzível de scope, diff, comandos e seg
 
 ## Definition of Ready
 
-- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [x] Todas as precondições abaixo foram verificadas.
-- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [x] Não existe outra task `ready` nem conflito de arquivos.
+- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [ ] Todas as precondições abaixo foram verificadas.
+- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [ ] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
-- TASK-032 aprovada no PR `#10`, com skills, hooks e reviewers portáveis validados.
-- Baseline fixado no merge commit `a3c04331e93134f600c85f7b57f1d940c3ba650c` de `origin/dev`.
+- TASK-036 aprovada; ela herda da TASK-035 snapshot seguro, inspeção Git e sanitização validados.
+- Baseline será fixado no merge commit aprovado da TASK-036 em `origin/dev`.
 - SPEC v1 fornece allowed scope e comandos como argv.
+- Runtime e imagem de validação aprovados estão disponíveis; ausência falha fechado sem fallback no host.
 
 ## Arquivos permitidos
 
@@ -67,6 +68,8 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | `secret_evidence` | tipo+path+fingerprint; valor proibido |
 | `snapshot_overwrite` | false |
 | `profile_source` | SPEC/config validada |
+| `command_trust` | `UNTRUSTED`; execução somente pelo `OciIsolationRunner` aprovado |
+| `isolation_missing` | bloqueia profile; nunca reclassifica comando como trusted |
 
 ## Passos de implementação
 
@@ -79,12 +82,13 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 
 | Risco | Controle obrigatório | Teste negativo |
 |---|---|---|
-| Gate aceitar mudança perigosa ou vazar segredo | Fail-closed, escopo independente e fingerprint | `test_scope_secret_and_immutable_snapshots` |
+| Gate aceitar mudança perigosa ou vazar segredo | Fail-closed, escopo independente e fingerprint | `test_scope_secret_and_diff_fail_closed` |
+| Profile executar repo no host | capability OCI da TASK-036 e nenhuma reclassificação trusted | `test_registered_profile_requires_strong_isolation` |
 
 ## Critérios de aceite
 
 - [ ] **AC-001** — Mudança fora de scope, segredo ou `git diff --check` falho bloqueiam snapshot.
-- [ ] **AC-002** — Profiles executam argv validado no worktree e persistem evidência sanitizada.
+- [ ] **AC-002** — Profile registrado executa os sete gates na ordem, sobre o mesmo snapshot, via isolamento forte; argv/cwd/env e evidências permanecem validados e sanitizados.
 - [ ] **AC-003** — Reexecução cria snapshot novo e resultado obrigatório falho impede sucesso.
 
 ## Matriz de verificação
@@ -92,7 +96,7 @@ Qualquer outro path é proibido, inclusive arquivo gerado não listado.
 | Critério | Comando exato | Teste/asserção | Evidência persistida |
 |---|---|---|---|
 | AC-001 | `uv run pytest tests/integration/test_validation_gates.py::test_scope_secret_and_diff_fail_closed -q` | três casos bloqueados | snapshots de findings |
-| AC-002 | `uv run pytest tests/integration/test_validation_gates.py::test_profile_uses_safe_process_runner -q` | argv/cwd/env capturados conforme contrato | ProcessResult refs |
+| AC-002 | `uv run pytest tests/integration/test_validation_gates.py::test_registered_profile_runs_all_gates_with_strong_isolation -q` | sete gates usam snapshot/capability e ausência de isolamento bloqueia | ProcessResult refs + snapshot/capability hashes |
 | AC-003 | `uv run pytest tests/integration/test_validation_gates.py::test_snapshots_are_immutable_and_mandatory -q` | IDs distintos; state não avança | ledger + artifact hashes |
 
 ## Validação manual no terminal

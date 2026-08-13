@@ -60,6 +60,8 @@ flowchart LR
     Model -->|"output não confiável"| Policy["Policy + schema + gates"]
     Policy -->|"capacidade mínima"| Tools["Git / Process / MCP adapters"]
     Tools --> Host["Host filesystem e processos"]
+    Policy -->|"manifest + argv não confiável"| Isolation["Snapshot + VM/OCI local"]
+    Isolation -->|"evidência limitada e sanitizada"| Policy
     Policy --> Store["SQLite + artifacts"]
     Remote["Provider remoto"] <-->|"rede e credenciais controladas"| Model
     Docs["Docs oficiais / Context7"] -->|"conteúdo remoto não confiável"| DocGateway["Documentation Gateway"]
@@ -74,17 +76,17 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 
 | Ameaça | Controles requeridos | Tasks principais |
 |---|---|---|
-| Prompt injection e agent goal hijack | separar policy de dados; rotular conteúdo do repo; ignorar instruções embutidas; output nunca autoriza ação; testes adversariais | 2, 8–9, 13, 15–16, 19–24, 29 |
-| Excessive agency/tool misuse | allowlist de capabilities; menor privilégio; deny network/external dirs; mediação em cada tool; human gate | 6, 8–9, 13, 15–18, 21–23 |
-| Command injection | argumentos tipados/array; `shell=False`; sem shell MCP; allowlist de executáveis e subcomandos; validação de paths | 2, 6–8, 23 |
-| Path traversal e symlink escape | canonicalização contra raiz; `openat`/sem seguir symlink quando aplicável; operações atômicas; testes TOCTOU | 2, 5–8, 12, 19, 23, 26–28 |
-| Código de build/test malicioso | trust profile; HOME/TMP efêmeros; zero credenciais; hooks desativados; rede negada; container/VM para não confiável | 6–8, 26, 31 |
-| Vazamento de segredo | env allowlist; redaction estrutural; SecretGate; permissões 0700/0600; prompts/artifacts sem auth; testes canário | 1, 5–9, 12–24, 26–31 |
-| Insecure output handling | schema estrito, limites de bytes/itens/profundidade, escaping contextual, nunca `eval`/pickle inseguro | 2, 5–6, 8–24 |
-| Supply chain comprometida | lock obrigatório; provenance/hash; dependency audit; secret/SAST scan; SBOM; revisão de nova dependência/modelo | 1, 14, 22, 24, 28, 31 |
+| Prompt injection e agent goal hijack | separar policy de dados; rotular conteúdo do repo; ignorar instruções embutidas; output nunca autoriza ação; testes adversariais | 2, 8–9, 13, 15–16, 19–24, 29, 35–36 |
+| Excessive agency/tool misuse | allowlist de capabilities; menor privilégio; deny network/external dirs; mediação em cada tool; human gate | 6, 8–9, 13, 15–18, 21–23, 35–36 |
+| Command injection | argumentos tipados/array; `shell=False`; sem shell MCP; allowlist de executáveis e subcomandos; validação de paths | 2, 6–8, 23, 35–36 |
+| Path traversal e symlink escape | canonicalização contra raiz; `openat`/sem seguir symlink quando aplicável; operações atômicas; testes TOCTOU | 2, 5–8, 12, 19, 23, 26–28, 35–36 |
+| Código de build/test malicioso | trust profile; snapshot privado; zero credenciais; rede negada; container/VM para não confiável | 6–8, 26, 31, 35–36 |
+| Vazamento de segredo | env allowlist; redaction estrutural; SecretGate; permissões 0700/0600; prompts/artifacts sem auth; testes canário | 1, 5–9, 12–24, 26–31, 35–36 |
+| Insecure output handling | schema estrito, limites de bytes/itens/profundidade, escaping contextual, nunca `eval`/pickle inseguro | 2, 5–6, 8–24, 35–36 |
+| Supply chain comprometida | lock obrigatório; provenance/hash; dependency audit; secret/SAST scan; SBOM; revisão de nova dependência/modelo | 1, 14, 22, 24, 28, 31, 36 |
 | TOCTOU na aprovação | aprovação vincula base commit + diff hash + worktree; gates repetidos imediatamente antes do commit; mudança invalida aprovação | 7, 18, 27–28, 31 |
-| Confused deputy/cross-run | autorização por run/task em toda tool; objetos não adivinháveis; locks; sessão MCP isolada; sem cache cruzado | 4–5, 7, 11–12, 23, 27, 30 |
-| DoS e consumo sem limite | timeout, cancelamento, quotas, bytes/tokens/processos limitados, backpressure e circuit breaker | 2, 6, 8, 11–13, 15, 20–24, 28, 30 |
+| Confused deputy/cross-run | autorização por run/task em toda tool; objetos não adivinháveis; locks; sessão MCP isolada; sem cache cruzado | 4–5, 7, 11–12, 23, 27, 30, 35–36 |
+| DoS e consumo sem limite | timeout, cancelamento, quotas, bytes/tokens/processos limitados, backpressure e circuit breaker | 2, 6, 8, 11–13, 15, 20–24, 28, 30, 35–36 |
 | Poisoning do router/contexto | provenance/hash; baseline estático; dados históricos validados; feature flag; rollback e explicação | 19, 21, 29 |
 | Exposição de código/dados ao provider cloud | context view mínima; SecretGate antes do CLI; profile fixa provider, classificação e retention; live explícito; provenance sem payload | 8, 13, 15, 19–22, 24, 31 |
 | Artifacts/DB adulterados | permissões locais; SHA-256; append-only events; migrations; integridade na leitura; backup/restore testado | 4–5, 8, 12, 24, 27–28 |
@@ -102,6 +104,9 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 ### Processos e Git
 
 - `ProcessRunner` aceita somente `Sequence[str]`, executable/cwd permitidos e `shell=False`;
+- runner de host rejeita sempre código `UNTRUSTED`; somente capability opaca emitida após probe de VM/OCI permite essa classificação;
+- avaliação usa snapshot privado com manifest/hash, nunca monta o worktree original; mudança concorrente invalida a evidência;
+- runtime OCI usa imagem por digest já provisionada, pull never, rede none, rootfs read-only, non-root, capabilities zero e limites fechados;
 - ambiente nasce vazio ou de allowlist mínima; remove tokens, proxy, agentes e paths de credencial não necessários;
 - HOME e TMP são efêmeros por attempt; stdout/stderr possuem limite, redaction e hash;
 - timeout encerra o grupo de processos; CPU, memória, arquivos, processos e output são limitados onde o SO permitir;
@@ -176,6 +181,7 @@ Toda seta é mediada por validação, autorização, limite de recursos, schema/
 | F-10 | router histórico podia sofrer poisoning | Média | provenance, baseline, rollback e validação na TASK-029 |
 | F-11 | documentação oficial/Context7 não possuía trust boundary, SSRF defense ou provenance | Crítica | gateway fechado, evidência versionada e abuse tests na TASK-033 |
 | F-12 | projeto greenfield podia receber código sem normas de qualidade, segurança, custo ou plataforma | Alta | pacote agnóstico, profiles e implementation gate na TASK-034 |
+| F-13 | Gates `UNTRUSTED` não possuíam backend de isolamento forte e o booleano declarativo não provava capability | Crítica | ADR-0006; snapshot/evidência na TASK-035 e runner OCI fail-closed na TASK-036 antes da TASK-008 |
 
 ## 9. Critérios de segurança da V1.1
 

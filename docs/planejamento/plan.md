@@ -75,7 +75,7 @@ O runtime cloud-only e sua fronteira de dados são normatizados pelo
 12. Roteamento e gates precisam explicar a decisão com evidências.
 13. Approval humana é obrigatória até a V1.1 e vincula o hash exato do diff e o base commit.
 14. Toda operação externa tem timeout, cancelamento, limite de recursos e resultado persistido.
-15. Sem isolamento forte, código de repositório não confiável não é executado no host.
+15. Sem capability material de isolamento forte, código de repositório não confiável não é executado; flag declarativa, env filtrado ou rlimit não substituem VM/container.
 16. Documentação externa é dado não confiável; fonte oficial versionada prevalece e Context7 nunca autoriza ação ou sustenta sozinho claim crítica.
 17. Projeto greenfield não recebe código antes de gerar e validar sua governança; projeto preexistente nunca tem regras sobrescritas automaticamente.
 
@@ -412,7 +412,7 @@ Artifacts são escritos por arquivo temporário + rename atômico, recebem SHA-2
 
 | Release | Tasks | Valor entregue | Gate de release |
 |---|---:|---|---|
-| V0.1 | 1–14, 32 | Pipeline real com automação agnóstica, OpenCode, worktree, estado, gates e failover sem perder diff | Claude/Codex compartilham política; Fake #1 quota → Fake #2 continua; OpenCode passa contract/security tests; dossier V0.1 |
+| V0.1 | 1–14, 32, 35–36 | Pipeline real com automação agnóstica, isolamento forte, OpenCode, worktree, estado, gates e failover sem perder diff | Código não confiável executa somente em snapshot OCI; Claude/Codex compartilham política; Fake #1 quota → Fake #2 continua; OpenCode passa contract/security tests; dossier V0.1 |
 | V0.2 | 15–18 | Codex reviewer, repair limitado e aprovação/commit seguros | ACs estruturados; repair revalida; approval exata e TOCTOU testado |
 | V0.3 | 19–22 | Contexto, Claude, planner cloud e perfis reproduzíveis | Manifest/hash estáveis; planner sem autoridade; fallback determinístico sem custo oculto; dossier V0.3 |
 | V0.4 | 23–24 | MCP semântico e observabilidade segura | MCP stdio isolado; traces/métricas redigidos; dossier V0.4 |
@@ -436,7 +436,9 @@ O planejamento é estado versionado da Factory e nunca entra no `.gitignore`. De
 | TASK-006 | [task6.md](task6.md) | ProcessRunner seguro e limitado | 5 |
 | TASK-007 | [task7.md](task7.md) | Worktree/lock/cleanup seguros | 6 |
 | TASK-032 | [task32.md](task32.md) | Automação agnóstica de agentes | 7 |
-| TASK-008 | [task8.md](task8.md) | Gates determinísticos e snapshots | 32 |
+| TASK-035 | [task35.md](task35.md) | Snapshot e evidência segura de avaliação | 32 |
+| TASK-036 | [task36.md](task36.md) | Runner OCI para gates não confiáveis | 35 |
+| TASK-008 | [task8.md](task8.md) | Gates determinísticos e snapshots | 36 |
 | TASK-009 | [task9.md](task9.md) | Pipeline E2E offline com FakeWorker | 8 |
 | TASK-010 | [task10.md](task10.md) | Taxonomia e seleção estática | 9 |
 | TASK-011 | [task11.md](task11.md) | Circuit breaker e provider health | 10 |
@@ -467,7 +469,7 @@ O planejamento é estado versionado da Factory e nunca entra no `.gitignore`. De
 
 ```mermaid
 flowchart LR
-    T1["1 Bootstrap"] --> T2["2 SPEC"] --> T3["3 Domain"] --> T4["4 SQLite"] --> T5["5 Artifacts"] --> T6["6 Process"] --> T7["7 Worktree"] --> T32["32 Agent automation"] --> T8["8 Gates"] --> T9["9 Fake E2E"]
+    T1["1 Bootstrap"] --> T2["2 SPEC"] --> T3["3 Domain"] --> T4["4 SQLite"] --> T5["5 Artifacts"] --> T6["6 Process"] --> T7["7 Worktree"] --> T32["32 Agent automation"] --> T35["35 Safe snapshot"] --> T36["36 OCI isolation"] --> T8["8 Gates"] --> T9["9 Fake E2E"]
     T9 --> T10["10 Pool"] --> T11["11 Circuit"] --> T12["12 Continuation"] --> T13["13 OpenCode"] --> T14["14 V0.1"]
     T14 --> T15["15 Codex"] --> T16["16 Review"] --> T17["17 Repair"] --> T18["18 Approval / V0.2"]
     T18 --> T19["19 Context"]
@@ -598,7 +600,7 @@ IDs de task ou run não entram como labels de métricas para evitar alta cardina
 - [ ] Benchmark e relatório podem ser repetidos a partir do mesmo base commit.
 - [ ] SAST/Ruff security, dependency audit, secret scan, SBOM e provenance passam.
 - [ ] Casos de abuso cobrem prompt injection, output hostil, traversal/symlink, segredo-canário, TOCTOU e consumo sem limite.
-- [ ] Repositório marcado como não confiável falha fechado quando isolamento forte não está disponível.
+- [ ] Repositório marcado como não confiável usa snapshot privado em isolamento OCI sem rede ou falha fechado; nunca há fallback para o host.
 - [ ] Checklist do threat model e matriz de chaos tests passam.
 
 ## 19. Riscos e mitigação
@@ -610,7 +612,7 @@ IDs de task ou run não entram como labels de métricas para evitar alta cardina
 | Dual write DB/arquivo divergir | SQLite autoritativo e export NDJSON reconstruível |
 | SQLite bloquear com paralelismo | WAL, transações curtas, sessões por task, busy timeout e métricas de contention |
 | Agente acessar fora do worktree | Sandbox do provider + external directory deny + scope gate |
-| Código de build/test comprometer o host | Trust profile; HOME/TMP efêmeros; sem credenciais/rede; isolamento forte para repo não confiável |
+| Código de build/test comprometer o host | Snapshot privado; capability OCI material; sem credenciais/rede; ausência falha fechado sem fallback |
 | Prompt injection elevar conteúdo a policy | Separar policy/dados, autoridade mínima, schema, gates e testes adversariais |
 | Symlink/path traversal escapar da raiz | Canonicalização, APIs seguras, validação no uso e testes TOCTOU |
 | Dependência ou CLI comprometida | Lock, audit, provenance, SBOM, versão/origem e revisão de novas dependências |
