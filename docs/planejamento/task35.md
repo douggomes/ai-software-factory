@@ -2,7 +2,7 @@
 title: "TASK-035 — Snapshot e evidência segura de avaliação"
 task_id: TASK-035
 release: "V0.1"
-status: ready
+status: done
 depends_on: [TASK-032]
 baseline_commit: "3ee145836564ca56ca583e3b0878eb7c522af0a4"
 risk_level: critical
@@ -117,10 +117,10 @@ implementa subprocesso, Git, cópia de filesystem ou redaction.
 
 ## Critérios de aceite
 
-- [ ] **AC-001** — Snapshot canonicalizado vincula repo/run/task, base/diff identity e hashes; path persistido externo, symlink ou troca de componente falha antes de leitura/cópia.
-- [ ] **AC-002** — Inventário limitado cobre tracked, untracked, ignored e binário; credencial/segredo gera somente tipo+path+fingerprint e nunca conteúdo bruto.
-- [ ] **AC-003** — Writer concorrente ou divergência entre manifest/conteúdo invalida a captura, e nenhum comando de avaliação toca o worktree original.
-- [ ] **AC-004** — Output excessivo ou hostil é limitado e sanitizado entre chunks antes da persistência, sem canário, private key ou token cloud nos refs/artifacts/erros.
+- [x] **AC-001** — Snapshot canonicalizado vincula repo/run/task, base/diff identity e hashes; path persistido externo, symlink ou troca de componente falha antes de leitura/cópia.
+- [x] **AC-002** — Inventário limitado cobre tracked, untracked, ignored e binário; credencial/segredo gera somente tipo+path+fingerprint e nunca conteúdo bruto.
+- [x] **AC-003** — Writer concorrente ou divergência entre manifest/conteúdo invalida a captura, e nenhum comando de avaliação toca o worktree original.
+- [x] **AC-004** — Output excessivo ou hostil é limitado e sanitizado entre chunks antes da persistência, sem canário, private key ou token cloud nos refs/artifacts/erros.
 
 ## Matriz de verificação
 

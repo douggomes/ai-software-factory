@@ -2,9 +2,9 @@
 title: "TASK-036 — Runner OCI para gates não confiáveis"
 task_id: TASK-036
 release: "V0.1"
-status: planned
+status: ready
 depends_on: [TASK-035]
-baseline_commit: "TO_BE_PINNED"
+baseline_commit: "db7c306006010f6070707d7cb317cb2199253f30"
 risk_level: critical
 ---
 
@@ -25,18 +25,19 @@ obedecem ao mesmo contrato; sem runtime/imagem aprovados, a execução bloqueia.
 
 ## Definition of Ready
 
-- [ ] Todas as tasks de `depends_on` foram aprovadas com evidência.
-- [ ] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
-- [ ] Todas as precondições abaixo foram verificadas.
-- [ ] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
-- [ ] Não existe outra task `ready` nem conflito de arquivos.
+- [x] Todas as tasks de `depends_on` foram aprovadas com evidência.
+- [x] `baseline_commit` foi substituído por SHA de 40 caracteres e confere com o checkout limpo.
+- [x] Todas as precondições abaixo foram verificadas.
+- [x] Interfaces/defaults continuam compatíveis com os artifacts das dependências.
+- [x] Não existe outra task `ready` nem conflito de arquivos.
 
 ## Precondições
 
-- TASK-035 aprovada com snapshot, inspeção e sanitização contract-tested.
+- TASK-035 aprovada com snapshot, inspeção e sanitização contract-tested no merge
+  `db7c306006010f6070707d7cb317cb2199253f30` de `origin/dev`.
 - Docker Desktop ou Podman machine local pode ser usado no smoke opt-in; a suíte
   obrigatória usa runtime fake offline que captura argv/env/mounts.
-- O baseline é fixado no merge commit aprovado da TASK-035.
+- O baseline foi fixado no merge commit aprovado da TASK-035.
 - Provisionamento da imagem é separado da execução; nenhum gate faz pull ou build implícito.
 - Build explícito da imagem usa somente registries oficiais aprovados e produz digest, SBOM e provenance.
 
