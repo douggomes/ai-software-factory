@@ -53,6 +53,7 @@ antes da persistência. Esta fatia não executa código não confiável.
 - `tests/integration/test_process_runner.py`
 - `tests/integration/test_process_output_sanitizer.py`
 - `tests/integration/test_evaluation_workspace.py`
+- `tests/security/__init__.py`
 - `tests/security/test_evaluation_workspace.py`
 - `docs/runbooks/evaluation-workspace.md`
 
