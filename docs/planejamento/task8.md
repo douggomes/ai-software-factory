@@ -2,7 +2,7 @@
 title: "TASK-008 — Gates determinísticos e snapshots"
 task_id: TASK-008
 release: "V0.1"
-status: ready
+status: done
 depends_on: [TASK-036]
 baseline_commit: "d1d5109701856ee1c0073da91e166805f868bc66"
 risk_level: high
