@@ -1,0 +1,80 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://ai-software-factory.local/schemas/run-report.v1.schema.json",
+  "title": "RunReport v1",
+  "description": "Canonical JSON schema for the AI Software Factory RunReport contract v1.",
+  "type": "object",
+  "required": [
+    "run_id",
+    "task_id",
+    "attempt_id",
+    "base_commit",
+    "head_commit",
+    "outcome",
+    "worker_id",
+    "diff_hash",
+    "created_at"
+  ],
+  "additionalProperties": false,
+  "properties": {
+    "run_id": {
+      "type": "string",
+      "pattern": "^run-[a-z0-9]{12}$",
+      "description": "Unique identifier for the factory run."
+    },
+    "task_id": {
+      "type": "string",
+      "pattern": "^TASK-\\d{3,}$",
+      "description": "Task identifier in TASK-NNN format."
+    },
+    "attempt_id": {
+      "type": "string",
+      "pattern": "^att-[a-z0-9]{12}$",
+      "description": "Unique identifier for the execution attempt."
+    },
+    "base_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Git commit SHA-1 at task start (40 hex chars)."
+    },
+    "head_commit": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{40}$",
+      "description": "Git commit SHA-1 at task completion (40 hex chars)."
+    },
+    "outcome": {
+      "type": "string",
+      "enum": ["SUCCEEDED", "FAILED", "CANCELLED"],
+      "description": "Final outcome of the task execution."
+    },
+    "worker_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength: 64,
+      "description": "Identifier of the worker that executed the task."
+    },
+    "diff_hash": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$",
+      "description": "SHA-256 hash of the diff between base_commit and head_commit."
+    },
+    "gate_snapshot_id": {
+      "type": ["string", "null"],
+      "pattern": "^val-[a-z0-9]{12}$",
+      "description": "Validation snapshot identifier if gates were run."
+    },
+    "artifact_refs": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "description": "Relative paths to persisted artifacts for this run."
+    },
+    "created_at": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when the report was created."
+    }
+  }
+}

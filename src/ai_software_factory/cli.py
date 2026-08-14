@@ -43,6 +43,16 @@ from ai_software_factory.adapters.persistence.artifact_store import (
 from ai_software_factory.adapters.persistence.sqlite import SQLiteRunStore
 from ai_software_factory.adapters.process.asyncio_runner import AsyncioProcessRunner
 from ai_software_factory.adapters.process.output_sanitizer import StreamingOutputSanitizer
+from ai_software_factory.application.orchestrator import (
+    FactoryOrchestrator,
+    OrchestratorError,
+    RunTask,
+    TaskNotFoundError,
+    WorkerUnavailableError,
+    WorkspacePreparationError,
+    EvaluationError,
+    GateExecutionError,
+)
 from ai_software_factory.application.queries import (
     RunEventsQuery,
     RunStatusQuery,
@@ -57,7 +67,7 @@ from ai_software_factory.core.evaluation_workspace import (
     EvaluationSnapshot,
 )
 from ai_software_factory.core.ids import RunId, TaskId
-from ai_software_factory.core.models import TaskExecution
+from ai_software_factory.core.models import Run, RunOutcome, RunStatus, TaskExecution
 from ai_software_factory.core.process_models import ProcessPolicy, ProcessRequest, ProcessResult
 from ai_software_factory.core.spec_models import (
     SoftwareSpec,
@@ -920,6 +930,148 @@ def _run_validate_command(
     return _EXIT_VALID if snapshot.status is GateStatus.PASSED else _EXIT_INVALID
 
 
+def _run_command(
+    spec_path: Path,
+    task_id_raw: str,
+    worker_id: str,
+    base_commit_raw: str | None,
+    factory_home: Path,
+    settings: Settings,
+) -> int:
+    """Execute a task end-to-end using the specified worker."""
+    try:
+        # Parse SPEC
+        try:
+            spec_text = spec_path.read_text(encoding="utf-8")
+        except OSError as error:
+            print(f"error: cannot read SPEC file: {error}", file=sys.stderr)
+            return _EXIT_INVALID
+
+        parser = SpecParser()
+        try:
+            spec = parser.parse(spec_text)
+        except SpecParseError as error:
+            print(f"error: {error}", file=sys.stderr)
+            return _EXIT_INVALID
+
+        # Validate task exists in SPEC
+        task_id = TaskId(task_id_raw)
+        task = next((t for t in spec.tasks if t.task_id.value == task_id.value), None)
+        if task is None:
+            print(f"error: task {task_id.value} not found in SPEC {spec.spec_id}", file=sys.stderr)
+            return _EXIT_INVALID
+
+        # Resolve base commit
+        if base_commit_raw is not None:
+            base_commit = base_commit_raw
+        else:
+            git_executable = _resolve_git_executable()
+            try:
+                base_commit = _read_only_git(git_executable, spec_path.parent, ("rev-parse", "HEAD"))
+            except (WorkspaceError, OSError) as error:
+                print(f"error: cannot determine base commit: {error}", file=sys.stderr)
+                return _EXIT_INVALID
+
+        # Resolve repository root
+        git_executable = _resolve_git_executable()
+        try:
+            repo_root = _read_only_git(git_executable, spec_path.parent, ("rev-parse", "--show-toplevel"))
+            repository = Path(repo_root).resolve(strict=True)
+        except (WorkspaceError, OSError) as error:
+            print(f"error: cannot determine repository root: {error}", file=sys.stderr)
+            return _EXIT_INVALID
+
+        # Generate run ID
+        import hashlib
+        import os
+        run_id = RunId(f"run-{hashlib.sha256(f'{spec.spec_id}{task_id.value}{base_commit}{os.urandom(8).hex()}'.encode()).hexdigest()[:12]}")
+
+        # Initialize adapters
+        artifact_store = FilesystemArtifactStore(factory_home)
+        process_runner = AsyncioProcessRunner(artifact_store, sanitizer_factory=StreamingOutputSanitizer)
+        git_executable = _resolve_git_executable()
+        store = asyncio.run(SQLiteRunStore.create(factory_home / "state.db"))
+        workspace_manager = GitWorktreeManager(process_runner, artifact_store, git_executable)
+        evaluation_workspace = GitEvaluationWorkspace(
+            process_runner,
+            artifact_store,
+            git_executable,
+            workspace_manager,
+            snapshot_id_factory=lambda: f"snap-{hashlib.sha256(os.urandom(8)).hexdigest()[:12]}",
+        )
+
+        orchestrator = FactoryOrchestrator(
+            run_store=store,
+            workspace_manager=workspace_manager,
+            evaluation_workspace=evaluation_workspace,
+            artifact_store=artifact_store,
+            process_runner=process_runner,
+            git_executable=git_executable,
+        )
+
+        command = RunTask(
+            run_id=run_id,
+            task_id=task_id,
+            spec_text=spec_text,
+            worker_id=worker_id,
+            base_commit=base_commit,
+            repository=repository,
+            factory_home=factory_home,
+            isolation_profile="default",
+        )
+
+        try:
+            report = asyncio.run(orchestrator.run_task(command))
+        finally:
+            workspace_manager.close()
+            asyncio.run(store.close())
+
+        # Output report as JSON
+        report_dict = {
+            "run_id": report.run_id.value,
+            "task_id": report.task_id.value,
+            "attempt_id": report.attempt_id.value,
+            "base_commit": report.base_commit,
+            "head_commit": report.head_commit,
+            "outcome": report.outcome.name,
+            "worker_id": report.worker_id,
+            "diff_hash": report.diff_hash,
+            "gate_snapshot_id": report.gate_snapshot_id,
+            "artifact_refs": list(report.artifact_refs),
+            "created_at": report.created_at,
+        }
+        print(json.dumps(report_dict, indent=2, sort_keys=True))
+
+        return _EXIT_VALID if report.outcome == RunOutcome.SUCCEEDED else _EXIT_INVALID
+
+    except TaskNotFoundError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    except WorkerUnavailableError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    except WorkspacePreparationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    except EvaluationError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    except GateExecutionError as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+    except (
+        ArtifactError,
+        EvaluationWorkspaceError,
+        ValidationError,
+        ValueError,
+        WorkspaceError,
+        OSError,
+        RunNotFoundError,
+    ) as error:
+        print(f"error: {error}", file=sys.stderr)
+        return _EXIT_INVALID
+
+
 def _discover_workspace_paths(factory_home: Path, run_id: RunId) -> tuple[Path, ...]:
     root = _canonical_cli_directory(factory_home, "factory home") / _WORKTREE_DIR_NAME
     if not root.exists():
@@ -1120,6 +1272,25 @@ def build_parser() -> argparse.ArgumentParser:
         "--profile", type=str, required=True, help="Registered validation profile name"
     )
 
+    run = subcommands.add_parser(
+        "run", help="Execute a task end-to-end using a worker (offline/fake only)"
+    )
+    run.add_argument("spec", type=Path, help="Path to the SPEC Markdown file")
+    run.add_argument("--task", type=str, required=True, help="Task ID to execute (e.g., TASK-001)")
+    run.add_argument(
+        "--worker",
+        type=str,
+        required=True,
+        choices=["fake-success", "fake-failure", "fake-error", "fake-prompt-injection"],
+        help="Worker to use for execution",
+    )
+    run.add_argument(
+        "--base-commit",
+        type=str,
+        default=None,
+        help="Base commit SHA (default: current HEAD)",
+    )
+
     return parser
 
 
@@ -1145,6 +1316,15 @@ def _dispatch(args: argparse.Namespace, factory_home: Path, settings: Settings) 
             args.profile,
             factory_home=factory_home,
             settings=settings,
+        )
+    elif args.command == "run":
+        result = _run_command(
+            args.spec,
+            args.task,
+            args.worker,
+            args.base_commit,
+            factory_home,
+            settings,
         )
     return result
 

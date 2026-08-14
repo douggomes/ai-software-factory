@@ -2,7 +2,7 @@
 title: "TASK-009 — Pipeline vertical offline com FakeAgentWorker"
 task_id: TASK-009
 release: "V0.1"
-status: planned
+status: ready
 depends_on: [TASK-008]
 baseline_commit: "TO_BE_PINNED"
 risk_level: high

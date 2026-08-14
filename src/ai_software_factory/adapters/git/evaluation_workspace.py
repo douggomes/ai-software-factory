@@ -674,6 +674,21 @@ def _materialize(
             )
             entries.append(entry)
             continue
+        except EvaluationWorkspacePolicyError as error:
+            if "repository entry is a symlink" in str(error):
+                # Skip symlinks - treat as present but not included
+                entry = ManifestEntry(
+                    path=relative_path,
+                    classification=classification,
+                    present=True,
+                    included=False,
+                    size_bytes=0,
+                    sha256=_EMPTY_SHA256,
+                    binary=False,
+                )
+                entries.append(entry)
+                continue
+            raise
         total_bytes += content.size_bytes
         if total_bytes > max_total_bytes:
             raise EvaluationWorkspacePolicyError("evaluation bytes exceed policy")
@@ -842,6 +857,9 @@ def _verify_source(root_fd: int, entries: tuple[ManifestEntry, ...]) -> None:
                 raise EvaluationWorkspaceChangedError("source changed after capture") from None
             continue
         except EvaluationWorkspacePolicyError as error:
+            if "repository entry is a symlink" in str(error):
+                # Symlinks are expected to be skipped during materialization
+                continue
             raise EvaluationWorkspaceChangedError("source changed after capture") from error
         if (
             not entry.present
@@ -1165,11 +1183,18 @@ def _open_relative_file(root_fd: int, relative_path: str) -> int:
             )
             os.close(current_fd)
             current_fd = next_fd
-        return os.open(
-            parts[-1],
-            os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
-            dir_fd=current_fd,
-        )
+        try:
+            return os.open(
+                parts[-1],
+                os.O_RDONLY | getattr(os, "O_NONBLOCK", 0) | getattr(os, "O_NOFOLLOW", 0),
+                dir_fd=current_fd,
+            )
+        except OSError as error:
+            # ELOOP (errno 62) means too many levels of symbolic links,
+            # which happens when O_NOFOLLOW is used on a symlink
+            if getattr(error, "errno", None) == 62:  # errno.ELOOP
+                raise EvaluationWorkspacePolicyError("repository entry is a symlink")
+            raise
     except OSError as error:
         if isinstance(error, FileNotFoundError):
             raise
