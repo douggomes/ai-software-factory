@@ -17,6 +17,7 @@ from ai_software_factory.core.ids import AttemptId, RunId, TaskId
 _BASE_COMMIT_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{40}$")
 #: SHA-256 config hash, hex.
 _CONFIG_HASH_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
+_SHA256_HEX_PATTERN: Final[re.Pattern[str]] = re.compile(r"^[0-9a-f]{64}$")
 
 
 class RunStatus(Enum):
@@ -124,3 +125,41 @@ class ExecutionAttempt:
     kind: AttemptKind
     worker_id: str
     parent_id: AttemptId | None = None
+
+
+class RunOutcome(Enum):
+    """Final outcome of a task execution."""
+
+    SUCCEEDED = auto()
+    FAILED = auto()
+    CANCELLED = auto()
+
+
+@dataclass(frozen=True, slots=True)
+class RunReport:
+    """Immutable report of a completed task execution.
+
+    Contains identity, outcome, and references to diff, gate, and artifact evidence.
+    """
+
+    run_id: RunId
+    task_id: TaskId
+    attempt_id: AttemptId
+    base_commit: str
+    head_commit: str
+    outcome: RunOutcome
+    worker_id: str
+    diff_hash: str
+    gate_snapshot_id: str | None = None
+    artifact_refs: tuple[str, ...] = ()
+    created_at: str = ""
+
+    def __post_init__(self) -> None:
+        if not _BASE_COMMIT_PATTERN.match(self.base_commit):
+            raise ValueError(f"invalid base_commit format: {self.base_commit!r}")
+        if not _BASE_COMMIT_PATTERN.match(self.head_commit):
+            raise ValueError(f"invalid head_commit format: {self.head_commit!r}")
+        if not _SHA256_HEX_PATTERN.match(self.diff_hash):
+            raise ValueError(f"invalid diff_hash format: {self.diff_hash!r}")
+        if self.gate_snapshot_id is not None and not re.fullmatch(r"val-[a-z0-9]{12}", self.gate_snapshot_id):
+            raise ValueError(f"invalid gate_snapshot_id format: {self.gate_snapshot_id!r}")
