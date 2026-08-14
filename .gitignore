@@ -25,3 +25,4 @@ artifacts/
 # corpus. Keep only the policy README; regenerate graphs locally when needed.
 graphify-out/*
 !graphify-out/README.md
+.claude/active-task
