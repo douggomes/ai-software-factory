@@ -23,8 +23,9 @@ CONTROL_CHARACTER_LIMIT: Final[int] = 32
 # User-owned local controls are globally ignored in this checkout. Direct writes and every
 # allowlisted shell argv still reject them; omitting them here preserves pre-task user state.
 PREEXISTING_HOST_LOCAL_PATHS: Final[frozenset[str]] = frozenset(
-    {".claude/settings.local.json", "CLAUDE.local.md"}
+    {".claude/settings.local.json", "CLAUDE.local.md", ".claude/active-task"}
 )
+_ACTIVE_TASK_MARKER: Final[str] = ".claude/active-task"
 _FRONTMATTER = re.compile(r"\A---\n(?P<body>.*?)\n---\n", re.DOTALL)
 _ALLOWED_SECTION = re.compile(
     r"^## Arquivos permitidos\n(?P<body>.*?)(?=^## |\Z)", re.MULTILINE | re.DOTALL
@@ -75,6 +76,9 @@ class TaskPolicy:
     task_path: str = ""
 
 
+_NO_TASK_POLICY: Final[TaskPolicy] = TaskPolicy(task_id="", allowed_patterns=())
+
+
 @dataclass(frozen=True, slots=True)
 class ToolInvocation:
     tool_name: str
@@ -99,16 +103,7 @@ def _frontmatter_value(text: str, key: str) -> str | None:
     return None
 
 
-def load_ready_policy(root: Path) -> TaskPolicy:
-    ready: list[tuple[Path, str]] = []
-    planning = root / "docs" / "planejamento"
-    for task_path in sorted(planning.glob("task[0-9]*.md")):
-        text = task_path.read_text(encoding="utf-8")
-        if _frontmatter_value(text, "status") == "ready":
-            ready.append((task_path, text))
-    if len(ready) != 1:
-        raise PolicyError("exactly one ready task is required")
-    task_path, text = ready[0]
+def _parse_task_policy(root: Path, task_path: Path, text: str) -> TaskPolicy:
     section = _ALLOWED_SECTION.search(text)
     if section is None:
         raise PolicyError("ready task has no allowed-path contract")
@@ -129,6 +124,41 @@ def load_ready_policy(root: Path) -> TaskPolicy:
         baseline_commit=baseline_commit,
         task_path=task_path.relative_to(root).as_posix(),
     )
+
+
+def load_ready_tasks(root: Path) -> tuple[TaskPolicy, ...]:
+    planning = root / "docs" / "planejamento"
+    ready: list[tuple[Path, str]] = []
+    for task_path in sorted(planning.glob("task[0-9]*.md")):
+        text = task_path.read_text(encoding="utf-8")
+        if _frontmatter_value(text, "status") == "ready":
+            ready.append((task_path, text))
+    if not ready:
+        raise PolicyError("no ready task is available")
+    return tuple(_parse_task_policy(root, task_path, text) for task_path, text in ready)
+
+
+def _select_active_policy(root: Path, policies: tuple[TaskPolicy, ...]) -> TaskPolicy:
+    if len(policies) == 1:
+        return policies[0]
+    seen_patterns: dict[str, str] = {}
+    for policy in policies:
+        for pattern in policy.allowed_patterns:
+            if pattern in seen_patterns:
+                raise PolicyError("ready tasks have overlapping allowed paths")
+            seen_patterns[pattern] = policy.task_id
+    marker = root / _ACTIVE_TASK_MARKER
+    if not marker.is_file():
+        raise PolicyError("multiple ready tasks require an active-task marker")
+    selected_id = marker.read_text(encoding="utf-8").strip()
+    matches = [policy for policy in policies if policy.task_id == selected_id]
+    if len(matches) != 1:
+        raise PolicyError("active-task marker does not match a ready task")
+    return matches[0]
+
+
+def load_ready_policy(root: Path) -> TaskPolicy:
+    return _select_active_policy(root, load_ready_tasks(root))
 
 
 def read_payload(stream: BinaryIO) -> dict[str, object]:
@@ -511,6 +541,17 @@ def _require_read_command(arguments: list[str], root: Path, policy: TaskPolicy) 
             if value.startswith(("/", "../")):
                 _require_repo_path(root, policy, value)
         return
+    if executable == "mkdir":
+        if arguments[1:2] != ["-p"] or len(arguments) != 3:
+            raise PolicyError("mkdir is restricted to a single -p target")
+        _require_allowed_path(root, policy, arguments[2])
+        return
+    if executable in {"cp", "mv"}:
+        if len(arguments) != 3:
+            raise PolicyError("cp/mv require exactly one source and one destination")
+        _require_allowed_path(root, policy, arguments[1])
+        _require_allowed_path(root, policy, arguments[2])
+        return
     raise PolicyError("shell command is not in the closed allowlist")
 
 
@@ -527,6 +568,32 @@ def _require_safe_shell(command: str, root: Path, policy: TaskPolicy) -> None:
         _require_gh(arguments, policy)
     else:
         _require_read_command(arguments, root, policy)
+
+
+_READ_ONLY_LOCAL: Final[frozenset[str]] = frozenset(
+    {"ls", "head", "tail", "wc", "sed", "rg", "pwd", "command"}
+)
+
+
+def _bash_is_read_only(arguments: list[str]) -> bool:
+    """Classify a parsed Bash invocation as safe to run without an active ready task.
+
+    Fails closed: anything not explicitly recognized here still goes through the
+    full ready-task and scope enforcement in ``main``.
+    """
+    executable = arguments[0]
+    if executable == "git":
+        return len(arguments) > 1 and arguments[1] in _READ_ONLY_GIT
+    if executable == "gh":
+        return arguments[1:] == ["auth", "status"] or arguments[1:3] in (
+            ["repo", "view"],
+            ["pr", "list"],
+            ["pr", "view"],
+            ["pr", "checks"],
+        )
+    if executable in {"uv", "python", "python3"}:
+        return True
+    return executable in _READ_ONLY_LOCAL
 
 
 def evaluate_pre(invocation: ToolInvocation, policy: TaskPolicy, root: Path) -> tuple[str, ...]:
@@ -741,8 +808,15 @@ def main() -> int:
             return _self_test(root)
         if args.host is None or args.phase is None:
             raise PolicyError("host and phase are required")
-        policy = load_ready_policy(root)
         invocation = _normalize_invocation(read_payload(sys.stdin.buffer), args.host)
+        if invocation.tool_name == "Bash":
+            arguments = _split_shell(_string_input(invocation.tool_input, "command"))
+            if _bash_is_read_only(arguments):
+                _require_safe_shell(
+                    _string_input(invocation.tool_input, "command"), root, _NO_TASK_POLICY
+                )
+                return 0
+        policy = load_ready_policy(root)
         direct_paths = evaluate_pre(invocation, policy, root)
         if args.phase == "post":
             audit_changed_scope(root, policy)
